@@ -34,8 +34,24 @@ export interface OfflineStateBundle {
   ibgeSeries: Record<string, Record<string, Record<string, number | null>>>;
 }
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const FETCH_TIMEOUT_MS = 18000;
+function resolveDataDir(): string {
+  const candidates = [
+    path.resolve(process.cwd(), 'data'),
+    path.resolve(import.meta.dirname ?? '.', '../../data'),
+    path.resolve(import.meta.dirname ?? '.', '../../../data'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'states.json'))) {
+      return dir;
+    }
+  }
+  return candidates[0];
+}
+
+const DATA_DIR = resolveDataDir();
+const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const FETCH_TIMEOUT_MS = IS_SERVERLESS ? 6500 : 18000;
+const IPEA_TIMEOUT_MS = IS_SERVERLESS ? 7500 : 30000;
 // Cache considerado fresco por 7 dias antes de tentar nova atualização online
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -175,7 +191,7 @@ export async function ensureIpeadataSeries(
       const url = `https://www.ipeadata.gov.br/api/odata4/ValoresSerie(SERCODIGO='${encodeURIComponent(code)}')`;
       const payload = await fetchJsonWithTimeout<{
         value?: Array<{ SERCODIGO: string; VALDATA: string; VALVALOR: number | null; NIVNOME: string; TERCODIGO: string }>;
-      }>(url, 30000);
+      }>(url, IPEA_TIMEOUT_MS);
 
       const now = new Date().toISOString();
       const rows = (payload.value || []).filter(

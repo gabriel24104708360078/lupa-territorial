@@ -8,9 +8,21 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { INDICATORS_CATALOG } from '../lib/indicatorsCatalog.ts';
 
-const DEFAULT_DB_PATH = path.resolve(process.cwd(), 'data', 'lupa_territorial.sqlite');
+const DEFAULT_LOCAL_DB_PATH = path.resolve(process.cwd(), 'data', 'lupa_territorial.sqlite');
+const SERVERLESS_TEMP_DB_PATH = '/tmp/lupa_territorial.sqlite';
 
-export function openDatabase(dbPath: string = process.env.SQLITE_DB_PATH || DEFAULT_DB_PATH): DatabaseSync {
+export function isServerlessRuntime(): boolean {
+  return Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+}
+
+export function resolveDefaultDbPath(): string {
+  if (process.env.SQLITE_DB_PATH && process.env.SQLITE_DB_PATH.trim() !== '') {
+    return process.env.SQLITE_DB_PATH;
+  }
+  return isServerlessRuntime() ? SERVERLESS_TEMP_DB_PATH : DEFAULT_LOCAL_DB_PATH;
+}
+
+export function openDatabase(dbPath: string = resolveDefaultDbPath()): DatabaseSync {
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });

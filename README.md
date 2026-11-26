@@ -128,9 +128,26 @@ npm run dev
 
 ---
 
-## 5. Decisões e Limitações Conhecidas
+## 5. Publicação no Vercel (Plano Hobby Gratuito) e Limitações
+
+1. Conecte o repositório do GitHub no **Vercel** (o `package.json` define `"engines": { "node": "22.x" }` e o `vercel.json` já configura o deploy):
+   - `buildCommand`: `"npm run build"` e `outputDirectory`: `"dist"`
+   - `functions["api/index.ts"].includeFiles`: `"data/**"` (com `.vercelignore` excluindo `data/*.sqlite*`), empacotando todas as amostras offline das 27 UFs na função
+   - `rewrites`: `/api/(.*)` redireciona para `/api/index` e as demais rotas caem em `/index.html`
+2. Não é necessário configurar chaves de API nem `GEMINI_API_KEY`, pois todas as fontes são públicas e o app não usa IA.
+
+### Como funciona o SQLite (`node:sqlite`) no Vercel (`/tmp`)
+- No runtime **Node 22 (`nodejs22.x`)** do Vercel, o módulo nativo `node:sqlite` (`DatabaseSync`) funciona diretamente sem compilação C++ (`node-gyp`), porém o sistema de arquivos da aplicação é **somente leitura**, exceto pelo diretório temporário **`/tmp`**.
+- Quando a variável de ambiente `VERCEL` existe, o servidor grava o banco SQLite automaticamente em **`/tmp/lupa_territorial.sqlite`**.
+- **Limitação do disco efêmero e timeout do plano Hobby:** em *cold starts* ou reciclagem de instâncias, `/tmp` começa vazio; o servidor recria as tabelas, tenta recarregar os dados das APIs do IBGE/Ipeadata (com timeout reduzido para respeitar o limite do plano Hobby) e, se falhar ou demorar, carrega imediatamente as amostras reais incluídas em `data/` exibindo **"Dados de &lt;data&gt; (modo offline)"**.
+- Para persistência definitiva multi-instância fora do `/tmp`, recomenda-se conectar um banco gerenciado externo (**PostgreSQL**).
+
+---
+
+## 6. Decisões e Limitações Conhecidas
 
 - **Fórmula do índice composto:** `IV(m) = Σ(wᵢ × vᵢ(m)) / Σwᵢ`, onde `vᵢ(m) = (x − mín) / (máx − mín)` entre os municípios do estado. Quando `maior_e_melhor = true`, aplica-se `1 − vᵢ(m)` para que `1` represente maior vulnerabilidade. Se `máx === mín`, adota-se `0,5`.
 - **Ipeadata sem filtro eficiente por município:** como o `$filter` do OData não filtra rapidamente por município, o servidor baixa a série uma vez, filtra `NIVNOME === 'Municípios'` e grava em `ipeadata_cache`.
 - **Privacidade:** não há login, cookies de rastreio, analytics nem coleta de dados pessoais; apenas estatísticas públicas agregadas.
 - **Fora do escopo:** dados por bairro ou setor censitário e modelos de previsão.
+
