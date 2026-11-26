@@ -1,0 +1,6 @@
+{
+  "name": "Lupa Territorial",
+  "description": "Retrato social comparativo de municípios brasileiros com índice composto transparente baseado em dados públicos do IBGE e Ipeadata.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
