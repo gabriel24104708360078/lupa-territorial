@@ -12,7 +12,8 @@ import {
   rankMunicipalitiesByIndex,
   toVulnerabilityScore,
 } from '../src/lib/indexCalculator.ts';
-import { convertQuestionMarksToPg } from '../src/db/client.ts';
+import { convertQuestionMarksToPg, normalizePgConnectionString } from '../src/db/client.ts';
+import { isPgAlreadyExistsError } from '../src/db/schema.ts';
 
 test('normalizeMinMax normaliza corretamente no intervalo [0, 1]', () => {
   assert.equal(normalizeMinMax(100, 100, 500), 0);
@@ -170,4 +171,23 @@ test('convertQuestionMarksToPg converte placeholders sem alterar strings literai
     convertQuestionMarksToPg(sql),
     "SELECT * FROM states WHERE sigla = $1 AND nome != 'Teste?' AND id = $2",
   );
+});
+
+test('normalizePgConnectionString configura sslmode=verify-full explicitamente em bancos remotos', () => {
+  const neon = normalizePgConnectionString(
+    'postgresql://user:pass@ep-cool.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require',
+  );
+  assert.ok(neon.connectionString.includes('sslmode=verify-full'));
+  assert.ok(neon.connectionString.includes('channel_binding=require'));
+  assert.deepEqual(neon.ssl, { rejectUnauthorized: true });
+
+  const local = normalizePgConnectionString('postgresql://postgres:postgres@localhost:5432/lupa?sslmode=disable');
+  assert.equal(local.ssl, false);
+});
+
+test('isPgAlreadyExistsError reconhece códigos 23505 e 42P07 de DDL concorrente', () => {
+  assert.equal(isPgAlreadyExistsError({ code: '23505' }), true);
+  assert.equal(isPgAlreadyExistsError({ code: '42P07' }), true);
+  assert.equal(isPgAlreadyExistsError({ code: '42601' }), false);
+  assert.equal(isPgAlreadyExistsError(null), false);
 });

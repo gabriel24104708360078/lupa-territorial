@@ -1,6 +1,6 @@
 /**
  * Interface única de acesso ao banco de dados para SQLite (local) e PostgreSQL (publicação via DATABASE_URL).
- * Mantém consultas parametrizadas, transações seguras e upsert em lote compatível com ambos os bancos.
+ * Suporta transações seguras, advisory locks para migrations no Postgres, SSL verify-full explícito e upsert em blocos de 500 linhas.
  */
 
 import fs from 'node:fs';
@@ -28,6 +28,11 @@ export interface DbExecutor {
 export interface AppDatabase extends DbExecutor {
   exec(sql: string): Promise<void>;
   transaction<T>(fn: (tx: DbExecutor) => Promise<T>): Promise<T>;
+  withAdvisoryLock<T>(
+    lockKey: number,
+    fn: (exec: DbExecutor) => Promise<T>,
+    options?: { transaction?: boolean },
+  ): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -71,6 +76,45 @@ export function convertQuestionMarksToPg(sql: string): string {
   return out;
 }
 
+/**
+ * Normaliza a string de conexão PostgreSQL para usar sslmode=verify-full explicitamente
+ * em conexões remotas, evitando o aviso de depreciação do pg-connection-string para prefer/require/verify-ca.
+ */
+export function normalizePgConnectionString(connectionString: string): {
+  connectionString: string;
+  ssl: false | { rejectUnauthorized: boolean } | undefined;
+} {
+  let parsed: URL;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    return { connectionString, ssl: undefined };
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  const sslMode = parsed.searchParams.get('sslmode')?.toLowerCase();
+
+  if (sslMode === 'disable') {
+    return { connectionString: parsed.toString(), ssl: false };
+  }
+
+  if (sslMode === 'no-verify') {
+    return { connectionString: parsed.toString(), ssl: { rejectUnauthorized: false } };
+  }
+
+  if (sslMode === 'prefer' || sslMode === 'require' || sslMode === 'verify-ca' || (!sslMode && !isLocal)) {
+    parsed.searchParams.set('sslmode', 'verify-full');
+    return { connectionString: parsed.toString(), ssl: { rejectUnauthorized: true } };
+  }
+
+  if (sslMode === 'verify-full') {
+    return { connectionString: parsed.toString(), ssl: { rejectUnauthorized: true } };
+  }
+
+  return { connectionString: parsed.toString(), ssl: undefined };
+}
+
 function buildBatchUpsertQuery(
   table: string,
   columns: string[],
@@ -97,12 +141,12 @@ function buildBatchUpsertQuery(
 
 async function runUpsertBatch(executor: DbExecutor, options: UpsertBatchOptions): Promise<void> {
   if (options.rows.length === 0) return;
-  const colCount = options.columns.length;
-  // Limita parâmetros por query bem abaixo do máximo do SQLite (32.766) e PostgreSQL (65.535)
-  const defaultChunk = Math.max(1, Math.min(options.chunkSize ?? 400, Math.floor(5000 / Math.max(1, colCount))));
+  const colCount = Math.max(1, options.columns.length);
+  // Blocos de ~500 linhas por INSERT (respeitando limites de parâmetros do SQLite 32.766 e PostgreSQL 65.535)
+  const chunkSize = Math.max(1, Math.min(options.chunkSize ?? 500, Math.floor(30000 / colCount)));
 
-  for (let i = 0; i < options.rows.length; i += defaultChunk) {
-    const slice = options.rows.slice(i, i + defaultChunk);
+  for (let i = 0; i < options.rows.length; i += chunkSize) {
+    const slice = options.rows.slice(i, i + chunkSize);
     const sql = buildBatchUpsertQuery(
       options.table,
       options.columns,
@@ -167,28 +211,47 @@ export async function createSqliteClient(dbPath: string): Promise<AppDatabase> {
         throw err;
       }
     },
+    async withAdvisoryLock<T>(
+      _lockKey: number,
+      fn: (exec: DbExecutor) => Promise<T>,
+      options?: { transaction?: boolean },
+    ): Promise<T> {
+      if (!options?.transaction) {
+        return fn(executor);
+      }
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        const result = await fn(executor);
+        db.exec('COMMIT;');
+        return result;
+      } catch (err) {
+        db.exec('ROLLBACK;');
+        throw err;
+      }
+    },
     async close(): Promise<void> {
       db.close();
     },
   };
 }
 
-export async function createPostgresClient(connectionString: string): Promise<AppDatabase> {
+export async function createPostgresClient(rawConnectionString: string): Promise<AppDatabase> {
   const pgModule = await import('pg');
   const Pool = pgModule.default?.Pool ?? pgModule.Pool;
 
-  const isLocal = connectionString.includes('localhost') || connectionString.includes('127.0.0.1');
-  const hasExplicitSslMode = connectionString.includes('sslmode=');
+  const { connectionString, ssl } = normalizePgConnectionString(rawConnectionString);
 
   const pool = new Pool({
     connectionString,
     max: 5,
     idleTimeoutMillis: 15000,
     connectionTimeoutMillis: 15000,
-    ...(!hasExplicitSslMode && !isLocal ? { ssl: { rejectUnauthorized: true } } : {}),
+    ...(ssl !== undefined ? { ssl } : {}),
   });
 
-  const makeExecutor = (runner: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }> }): DbExecutor => {
+  const makeExecutor = (runner: {
+    query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>;
+  }): DbExecutor => {
     const execObj: DbExecutor = {
       dialect: 'postgres',
       async queryAll<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
@@ -229,6 +292,32 @@ export async function createPostgresClient(connectionString: string): Promise<Ap
         await client.query('ROLLBACK').catch(() => undefined);
         throw err;
       } finally {
+        client.release();
+      }
+    },
+    async withAdvisoryLock<T>(
+      lockKey: number,
+      fn: (exec: DbExecutor) => Promise<T>,
+      options?: { transaction?: boolean },
+    ): Promise<T> {
+      const client = await pool.connect();
+      const lockedExec = makeExecutor(client);
+      try {
+        await client.query('SELECT pg_advisory_lock($1)', [lockKey]);
+        if (!options?.transaction) {
+          return await fn(lockedExec);
+        }
+        await client.query('BEGIN');
+        try {
+          const result = await fn(lockedExec);
+          await client.query('COMMIT');
+          return result;
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => undefined);
+          throw err;
+        }
+      } finally {
+        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]).catch(() => undefined);
         client.release();
       }
     },

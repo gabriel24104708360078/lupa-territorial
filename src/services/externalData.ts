@@ -134,15 +134,20 @@ export async function ensureStatesList(
       'https://servicodados.ibge.gov.br/api/v1/localidades/estados',
     );
     const now = new Date().toISOString();
-    await db.transaction(async (tx) => {
-      await tx.upsertBatch({
-        table: 'states',
-        columns: ['id', 'sigla', 'nome', 'regiao', 'collected_at', 'is_offline', 'is_teste'],
-        rows: remote.map((uf) => [uf.id, uf.sigla, uf.nome, uf.regiao?.nome || '', now, 0, 0]),
-        conflictColumns: ['id'],
-        updateColumns: ['sigla', 'nome', 'regiao', 'collected_at', 'is_offline'],
-      });
-    });
+    await db.withAdvisoryLock(
+      84729105,
+      async (tx) => {
+        await tx.upsertBatch({
+          table: 'states',
+          columns: ['id', 'sigla', 'nome', 'regiao', 'collected_at', 'is_offline', 'is_teste'],
+          rows: remote.map((uf) => [uf.id, uf.sigla, uf.nome, uf.regiao?.nome || '', now, 0, 0]),
+          conflictColumns: ['id'],
+          updateColumns: ['sigla', 'nome', 'regiao', 'collected_at', 'is_offline'],
+          chunkSize: 500,
+        });
+      },
+      { transaction: true },
+    );
   } catch {
     if (realStates.length >= 27) {
       return {
@@ -158,15 +163,20 @@ export async function ensureStatesList(
     if (!offline) {
       throw new Error('Falha na API de localidades do IBGE e arquivo offline data/states.json indisponível.');
     }
-    await db.transaction(async (tx) => {
-      await tx.upsertBatch({
-        table: 'states',
-        columns: ['id', 'sigla', 'nome', 'regiao', 'collected_at', 'is_offline', 'is_teste'],
-        rows: offline.states.map((uf) => [uf.id, uf.sigla, uf.nome, uf.regiao, offline.collectedAt, 1, 0]),
-        conflictColumns: ['id'],
-        updateColumns: ['sigla', 'nome', 'regiao', 'collected_at', 'is_offline'],
-      });
-    });
+    await db.withAdvisoryLock(
+      84729105,
+      async (tx) => {
+        await tx.upsertBatch({
+          table: 'states',
+          columns: ['id', 'sigla', 'nome', 'regiao', 'collected_at', 'is_offline', 'is_teste'],
+          rows: offline.states.map((uf) => [uf.id, uf.sigla, uf.nome, uf.regiao, offline.collectedAt, 1, 0]),
+          conflictColumns: ['id'],
+          updateColumns: ['sigla', 'nome', 'regiao', 'collected_at', 'is_offline'],
+          chunkSize: 500,
+        });
+      },
+      { transaction: true },
+    );
   }
 
   const updated = await db.queryAll<StateRow>(
@@ -288,15 +298,20 @@ export async function ensureIpeadataSeries(
     }
 
     if (allRows.length > 0) {
-      await db.transaction(async (tx) => {
-        await tx.upsertBatch({
-          table: 'ipeadata_cache',
-          columns: ['series_code', 'municipality_id', 'ano', 'valor', 'collected_at', 'source_mode'],
-          rows: allRows,
-          conflictColumns: ['series_code', 'municipality_id', 'ano'],
-          updateColumns: ['valor', 'collected_at', 'source_mode'],
-        });
-      });
+      await db.withAdvisoryLock(
+        84729104,
+        async (tx) => {
+          await tx.upsertBatch({
+            table: 'ipeadata_cache',
+            columns: ['series_code', 'municipality_id', 'ano', 'valor', 'collected_at', 'source_mode'],
+            rows: allRows,
+            conflictColumns: ['series_code', 'municipality_id', 'ano'],
+            updateColumns: ['valor', 'collected_at', 'source_mode'],
+            chunkSize: 500,
+          });
+        },
+        { transaction: true },
+      );
     }
   }
 
@@ -605,30 +620,36 @@ export async function ensureStateDataLoaded(
     }
   }
 
-  await db.transaction(async (tx) => {
-    await tx.execute('UPDATE states SET malha_geojson = ?, collected_at = ?, is_offline = ? WHERE id = ?', [
-      malhaGeoJson,
-      ibgeCollectedAt,
-      ibgeMode === 'offline' ? 1 : 0,
-      stateId,
-    ]);
+  await db.withAdvisoryLock(
+    84729200 + stateId,
+    async (tx) => {
+      await tx.execute('UPDATE states SET malha_geojson = ?, collected_at = ?, is_offline = ? WHERE id = ?', [
+        malhaGeoJson,
+        ibgeCollectedAt,
+        ibgeMode === 'offline' ? 1 : 0,
+        stateId,
+      ]);
 
-    await tx.upsertBatch({
-      table: 'municipalities',
-      columns: ['id', 'state_id', 'nome', 'microrregiao', 'regiao_imediata', 'is_teste'],
-      rows: munRows,
-      conflictColumns: ['id'],
-      updateColumns: ['nome', 'microrregiao', 'regiao_imediata'],
-    });
+      await tx.upsertBatch({
+        table: 'municipalities',
+        columns: ['id', 'state_id', 'nome', 'microrregiao', 'regiao_imediata', 'is_teste'],
+        rows: munRows,
+        conflictColumns: ['id'],
+        updateColumns: ['nome', 'microrregiao', 'regiao_imediata'],
+        chunkSize: 500,
+      });
 
-    await tx.upsertBatch({
-      table: 'indicator_values',
-      columns: ['municipality_id', 'indicator_code', 'ano', 'valor', 'collected_at', 'source_mode', 'is_teste'],
-      rows: Array.from(valMap.values()),
-      conflictColumns: ['municipality_id', 'indicator_code', 'ano', 'is_teste'],
-      updateColumns: ['valor', 'collected_at', 'source_mode'],
-    });
-  });
+      await tx.upsertBatch({
+        table: 'indicator_values',
+        columns: ['municipality_id', 'indicator_code', 'ano', 'valor', 'collected_at', 'source_mode', 'is_teste'],
+        rows: Array.from(valMap.values()),
+        conflictColumns: ['municipality_id', 'indicator_code', 'ano', 'is_teste'],
+        updateColumns: ['valor', 'collected_at', 'source_mode'],
+        chunkSize: 500,
+      });
+    },
+    { transaction: true },
+  );
 
   return {
     isOffline: ibgeMode === 'offline',

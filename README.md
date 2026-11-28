@@ -142,16 +142,16 @@ npm run dev
 ## 5. Publicação no Vercel (Plano Hobby Gratuito) e Limitações
 
 1. Conecte o repositório do GitHub no **Vercel** (o `package.json` define `"engines": { "node": "22.x" }` e o `vercel.json` já configura o deploy):
-   - `regions`: `["gru1"]` (São Paulo, reduzindo a latência até as APIs do IBGE e do Ipeadata)
+   - `regions`: `["iad1"]` (Leste dos EUA / `us-east-1`, mesma região do banco Neon PostgreSQL, reduzindo a latência de ida e volta entre a função e o banco)
    - `buildCommand`: `"npm run build"` e `outputDirectory`: `"dist"`
    - `functions["api/index.ts"]`: `includeFiles: "data/**"` (com `.vercelignore` excluindo `data/*.sqlite*`) e `maxDuration: 60`
    - `rewrites`: `/api/(.*)` redireciona para `/api/index` e as demais rotas caem em `/index.html`
 2. No painel do projeto na Vercel, conecte um banco **Neon (PostgreSQL)** pelo **Vercel Marketplace** para que a variável de ambiente **`DATABASE_URL`** seja injetada automaticamente no servidor (sem gravar credenciais no repositório). Não é necessário configurar chaves de API nem `GEMINI_API_KEY`, pois todas as fontes são públicas e o app não usa IA.
 
 ### Como funciona a persistência na publicação (PostgreSQL via `DATABASE_URL` e fallback `/tmp`)
-- Quando **`DATABASE_URL`** está definida (ex.: Neon PostgreSQL na Vercel), o servidor executa automaticamente as migrations das 5 tabelas no PostgreSQL e persiste cache e histórico de forma definitiva entre chamadas serverless.
+- Quando **`DATABASE_URL`** está definida (ex.: Neon PostgreSQL na Vercel), o servidor normaliza explicitamente a conexão para **`sslmode=verify-full`** (eliminando avisos de depreciação de `prefer`/`require` no `pg`), executa as migrations uma única vez por instância usando promessa compartilhada + **`pg_advisory_lock`/`pg_advisory_unlock`** (tratando códigos `23505` e `42P07` de DDL concorrente como "já existe") e grava todas as inserções em lote (**blocos de até 500 linhas** em transação única).
 - Caso `DATABASE_URL` não esteja definida na Vercel (`VERCEL` presente), o servidor usa o SQLite nativo (`node:sqlite`, compatível com `nodejs22.x` sem compilação C++) em **`/tmp/lupa_territorial.sqlite`**, com limitação de disco efêmero em *cold starts*.
-- **Consultas ao vivo e plano B granular:** quando o cache para uma UF ainda está vazio ou expirado, o servidor dispara as chamadas ao IBGE (Localidades, Malhas e SIDRA) e ao Ipeadata em paralelo (`Promise.all`, com tempo-limite de **25 s** por requisição) e só recorre às amostras em `data/` caso alguma fonte realmente falhe ou estoure o limite. Se o IBGE responder ao vivo e apenas um indicador do Ipeadata falhar, apenas aquele indicador usa a amostra local com aviso explícito na tela, sem marcar o estado inteiro como offline; se o IBGE falhar, exibe **"Dados de &lt;data&gt; (modo offline)"**.
+- **Consultas ao vivo e plano B granular:** quando o cache para uma UF ainda está vazio ou expirado, o servidor dispara as chamadas ao IBGE (Localidades, Malhas e SIDRA) e ao Ipeadata em paralelo (`Promise.all`, com tempo-limite de **25 s** por requisição), armazena apenas linhas municipais (`NIVNOME = 'Municípios'`) do Ipeadata em `ipeadata_cache` e só recorre às amostras em `data/` caso alguma fonte realmente falhe ou estoure o limite. Se o IBGE responder ao vivo e apenas um indicador do Ipeadata falhar, apenas aquele indicador usa a amostra local com aviso explícito na tela, sem marcar o estado inteiro como offline; se o IBGE falhar, exibe **"Dados de &lt;data&gt; (modo offline)"**.
 
 ---
 
@@ -180,6 +180,7 @@ npm run dev
 7. **Instalação limpa com `npm install`:** atualizado `esbuild` de `^0.25.0` para `^0.28.0` (compatível com `vite ^8.3.0`), renomeado o pacote para `lupa-territorial` e removido `bun.lock` para que `npm install` execute sem `--legacy-peer-deps`.
 8. **Banco persistente na publicação (PostgreSQL/Neon):** criada a interface única `AppDatabase` (`src/db/client.ts`) que usa PostgreSQL (`pg`) com migrations automáticas e upserts em lote quando `DATABASE_URL` está definida (Neon via Vercel Marketplace) e mantém SQLite local sem `DATABASE_URL`.
 9. **Análise de sensibilidade e escala sequencial do mapa:** adicionada a tabela acessível de variação de posição no ranking estadual ao retirar cada indicador (`peso = 0`), com teste unitário dedicado, e ajustada a paleta do mapa para uma escala sequencial de um só matiz (Teal claro ao escuro) com borda tracejada para áreas sem dado.
+10. **Concorrência de migrations, latência com Neon e SSL explícito:** adicionados `pg_advisory_lock`/`pg_advisory_unlock`, promessa compartilhada de migração e tratamento de códigos `23505`/`42P07` para eliminar erro 502 em requisições simultâneas no primeiro acesso; alterada a região da Vercel para `iad1` (mesma do banco Neon `us-east-1`); padronizados os inserts em blocos de 500 linhas dentro de transação única (com filtro exclusivo para `NIVNOME = 'Municípios'` no cache do Ipeadata); e configurado `sslmode=verify-full` explícito no cliente PostgreSQL.
 
 ### Prompts principais utilizados (em ordem cronológica, na íntegra)
 
@@ -301,5 +302,21 @@ Revisei o projeto contra o PDF da atividade e faltam estes pontos. Corrija todos
 
 Rode npm install (sem flags), npm test, npm run lint e npm run build e me mostre o resultado.
 ```
+
+#### 8) Correção de concorrência nas migrations, latência Vercel/Neon e SSL explícito
+```text
+Publiquei na Vercel com o Neon (DATABASE_URL configurada). Funciona, mas os logs mostram dois problemas:
+
+1) ERRO 502 NO PRIMEIRO ACESSO: requisições simultâneas rodam runMigrations ao mesmo tempo e o Postgres dá "duplicate key value violates unique constraint pg_type_typname_nsp_index" (Key (typname, typnamespace)=(states, 2200) already exists), vindo de runMigrations (src/db/schema.ts) chamado em src/server/apiApp.ts. Corrija: rode as migrations uma única vez por instância (promessa compartilhada) e, no Postgres, dentro de pg_advisory_lock/unlock; trate os códigos 23505 e 42P07 nas migrations como "já existe" e siga em frente.
+
+2) LENTIDÃO: a primeira carga de um estado leva cerca de 37 s. O banco Neon está em us-east-1 e as gravações são feitas linha a linha (inclusive o cache do Ipeadata, com dezenas de milhares de linhas). Corrija:
+- grave em lote (INSERT com vários VALUES, em blocos de cerca de 500 linhas, numa transação), tanto no SQLite quanto no Postgres;
+- no cache do Ipeadata, grave só as linhas de municípios (NIVNOME = 'Municípios'), que são as usadas;
+- no vercel.json troque "regions" para ["iad1"], a mesma região do banco (us-east-1), mantendo os tempos-limite de 25 s para as APIs;
+- configure o SSL do pg de forma explícita para sumir o aviso "SECURITY WARNING: The SSL modes 'prefer', 'require'…" (use sslmode=verify-full ou o equivalente na configuração do Pool).
+
+Atualize o README (seção de publicação e a seção 7, acrescentando este prompt como 8) e rode npm test, npm run lint e npm run build.
+```
+
 
 
