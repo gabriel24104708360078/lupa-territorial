@@ -136,3 +136,144 @@ export function computeCompositeIndexForState(
 
   return results;
 }
+
+export interface SensitivityIndicatorShift {
+  indicatorCode: string;
+  indicatorName: string;
+  currentWeight: number;
+  baseRank: number | null;
+  newRank: number | null;
+  /** Diferença de posição no ranking (1º = mais vulnerável): positivo = subiu posições; negativo = desceu posições */
+  rankDelta: number | null;
+  baseIndex: number | null;
+  newIndex: number | null;
+}
+
+export interface MunicipalitySensitivityResult {
+  municipalityId: string;
+  totalRanked: number;
+  baseRank: number | null;
+  baseIndex: number | null;
+  shifts: SensitivityIndicatorShift[];
+}
+
+/**
+ * Ordena os municípios pelo índice composto (1º = maior vulnerabilidade do estado).
+ * Empates exatos são desempatados pelo código IBGE para manter determinismo.
+ */
+export function rankMunicipalitiesByIndex(
+  results: Record<string, NormalizedMunicipalityResult>,
+): { ranks: Record<string, number | null>; totalRanked: number } {
+  const valid = Object.values(results)
+    .filter((r): r is NormalizedMunicipalityResult & { compositeIndex: number } => r.compositeIndex !== null)
+    .sort((a, b) => {
+      const diff = b.compositeIndex - a.compositeIndex;
+      if (Math.abs(diff) > 1e-12) return diff;
+      return a.municipalityId.localeCompare(b.municipalityId);
+    });
+
+  const ranks: Record<string, number | null> = {};
+  for (const id of Object.keys(results)) {
+    ranks[id] = null;
+  }
+  valid.forEach((item, idx) => {
+    ranks[item.municipalityId] = idx + 1;
+  });
+
+  return { ranks, totalRanked: valid.length };
+}
+
+/**
+ * Análise de sensibilidade: para os municípios selecionados, calcula a posição atual no ranking do estado
+ * e a nova posição ao zerar o peso de cada indicador individualmente (1 por vez).
+ * Mudanças grandes indicam que a colocação daquele município depende fortemente daquele indicador.
+ */
+export function computeSensitivityAnalysis(
+  municipalities: MunicipalityMetricInput[],
+  weights: Record<string, number>,
+  selectedMunicipalityIds: string[],
+  catalog: IndicatorDefinition[] = INDICATORS_CATALOG,
+): Record<string, MunicipalitySensitivityResult> {
+  const indexIndicators = catalog.filter((i) => i.incluirNoIndice);
+  const baseResults = computeCompositeIndexForState(municipalities, weights, indexIndicators);
+  const { ranks: baseRanks, totalRanked } = rankMunicipalitiesByIndex(baseResults);
+
+  // Calcula uma vez o ranking estadual sem cada indicador ativo (peso = 0)
+  const scenarioByIndicator: Record<
+    string,
+    {
+      currentWeight: number;
+      results: Record<string, NormalizedMunicipalityResult>;
+      ranks: Record<string, number | null>;
+    }
+  > = {};
+
+  for (const ind of indexIndicators) {
+    const currentWeight = Math.max(0, Number(weights[ind.code] ?? 0));
+    if (currentWeight <= 0) {
+      scenarioByIndicator[ind.code] = {
+        currentWeight: 0,
+        results: baseResults,
+        ranks: baseRanks,
+      };
+      continue;
+    }
+
+    const withoutIndWeights = { ...weights, [ind.code]: 0 };
+    const scenarioResults = computeCompositeIndexForState(municipalities, withoutIndWeights, indexIndicators);
+    const { ranks } = rankMunicipalitiesByIndex(scenarioResults);
+    scenarioByIndicator[ind.code] = {
+      currentWeight,
+      results: scenarioResults,
+      ranks,
+    };
+  }
+
+  const output: Record<string, MunicipalitySensitivityResult> = {};
+  for (const munId of selectedMunicipalityIds) {
+    const baseRank = baseRanks[munId] ?? null;
+    const baseIndex = baseResults[munId]?.compositeIndex ?? null;
+
+    const shifts: SensitivityIndicatorShift[] = indexIndicators.map((ind) => {
+      const scenario = scenarioByIndicator[ind.code];
+      if (scenario.currentWeight <= 0) {
+        return {
+          indicatorCode: ind.code,
+          indicatorName: ind.nomeCurto,
+          currentWeight: 0,
+          baseRank,
+          newRank: baseRank,
+          rankDelta: baseRank !== null ? 0 : null,
+          baseIndex,
+          newIndex: baseIndex,
+        };
+      }
+
+      const newRank = scenario.ranks[munId] ?? null;
+      const newIndex = scenario.results[munId]?.compositeIndex ?? null;
+      const rankDelta = baseRank !== null && newRank !== null ? baseRank - newRank : null;
+
+      return {
+        indicatorCode: ind.code,
+        indicatorName: ind.nomeCurto,
+        currentWeight: scenario.currentWeight,
+        baseRank,
+        newRank,
+        rankDelta,
+        baseIndex,
+        newIndex,
+      };
+    });
+
+    output[munId] = {
+      municipalityId: munId,
+      totalRanked,
+      baseRank,
+      baseIndex,
+      shifts,
+    };
+  }
+
+  return output;
+}
+

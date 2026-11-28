@@ -6,10 +6,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   computeCompositeIndexForState,
+  computeSensitivityAnalysis,
   computeStateBounds,
   normalizeMinMax,
+  rankMunicipalitiesByIndex,
   toVulnerabilityScore,
 } from '../src/lib/indexCalculator.ts';
+import { convertQuestionMarksToPg } from '../src/db/client.ts';
 
 test('normalizeMinMax normaliza corretamente no intervalo [0, 1]', () => {
   assert.equal(normalizeMinMax(100, 100, 500), 0);
@@ -113,4 +116,58 @@ test('computeStateBounds e computeCompositeIndexForState lidam com valores nulos
   assert.equal(res['1'].compositeIndex, 1);
   assert.equal(res['2'].compositeIndex, 0);
   assert.equal(res['1'].normalizedVulnerability['agua_2022'], null);
+});
+
+test('computeSensitivityAnalysis calcula ranking estadual e deslocamento ao retirar cada indicador', () => {
+  // Cenário com 3 municípios em que M2 possui renda muito pior que M3, mas água/esgoto melhores:
+  // Com peso igual entre renda_2022 e agua_2022:
+  // M1: renda=1000 (vuln 1.0), agua=20 (vuln 1.0) -> média 1.00 (1º)
+  // M2: renda=1200 (vuln 0.9), agua=90 (vuln 0.125) -> média 0.5125 (2º)
+  // M3: renda=3000 (vuln 0.0), agua=100 (vuln 0.0) -> média 0.00 (3º)
+  // Mas se colocarmos M4 intermediário com renda=2500 (vuln 0.25) e agua=30 (vuln 0.875) -> média 0.5625 (2º), M2 fica em 3º.
+  // Ao retirar renda_2022 (peso 0), M2 cai de 0.5125 para 0.125 e M4 vai para 0.875, ou ao retirar agua_2022, M2 salta para 2º (+1)!
+  const municipalities = [
+    { municipalityId: 'M1', values: { renda_2022: 1000, agua_2022: 20 } },
+    { municipalityId: 'M2', values: { renda_2022: 1200, agua_2022: 90 } },
+    { municipalityId: 'M4', values: { renda_2022: 2500, agua_2022: 30 } },
+    { municipalityId: 'M3', values: { renda_2022: 3000, agua_2022: 100 } },
+  ];
+
+  const weights = { renda_2022: 1, agua_2022: 1, idhm_2010: 0 };
+  const base = computeCompositeIndexForState(municipalities, weights);
+  const ranked = rankMunicipalitiesByIndex(base);
+  assert.equal(ranked.totalRanked, 4);
+  assert.equal(ranked.ranks['M1'], 1);
+  assert.equal(ranked.ranks['M4'], 2);
+  assert.equal(ranked.ranks['M2'], 3);
+  assert.equal(ranked.ranks['M3'], 4);
+
+  const sensitivity = computeSensitivityAnalysis(municipalities, weights, ['M2', 'M4']);
+  const sM2 = sensitivity['M2'];
+  assert.equal(sM2.baseRank, 3);
+
+  // Ao retirar agua_2022 (em que M2 era bom), M2 passa a ser avaliado só por renda (vuln 0.9) e sobe de 3º para 2º (+1)
+  const aguaShiftM2 = sM2.shifts.find((s) => s.indicatorCode === 'agua_2022');
+  assert.ok(aguaShiftM2);
+  assert.equal(aguaShiftM2.newRank, 2);
+  assert.equal(aguaShiftM2.rankDelta, 1);
+
+  // M4, por outro lado, cai de 2º para 3º (-1) quando agua_2022 é retirada
+  const aguaShiftM4 = sensitivity['M4'].shifts.find((s) => s.indicatorCode === 'agua_2022');
+  assert.ok(aguaShiftM4);
+  assert.equal(aguaShiftM4.newRank, 3);
+  assert.equal(aguaShiftM4.rankDelta, -1);
+
+  // Indicador já zerado (idhm_2010) mantém rankDelta = 0
+  const idhmShiftM2 = sM2.shifts.find((s) => s.indicatorCode === 'idhm_2010');
+  assert.ok(idhmShiftM2);
+  assert.equal(idhmShiftM2.rankDelta, 0);
+});
+
+test('convertQuestionMarksToPg converte placeholders sem alterar strings literais', () => {
+  const sql = "SELECT * FROM states WHERE sigla = ? AND nome != 'Teste?' AND id = ?";
+  assert.equal(
+    convertQuestionMarksToPg(sql),
+    "SELECT * FROM states WHERE sigla = $1 AND nome != 'Teste?' AND id = $2",
+  );
 });

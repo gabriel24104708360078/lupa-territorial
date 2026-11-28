@@ -7,6 +7,7 @@ import { ExternalLink } from 'lucide-react';
 import { formatDatePtBr, type IndicatorMeta, type OfflineIndicatorNotice } from '../types/territorial.ts';
 
 interface AboutApiResponse {
+  dialect?: 'sqlite' | 'postgres';
   indicators: Array<{
     code: string;
     nome: string;
@@ -223,7 +224,7 @@ export function AboutDataPage({
       {aboutData?.stats && (
         <section aria-labelledby="about-cache" className="rounded-lg border border-slate-200 bg-white p-6">
           <h2 id="about-cache" className="text-lg font-semibold text-slate-900">
-            Persistência local (SQLite)
+            {aboutData.dialect === 'postgres' ? 'Persistência em PostgreSQL' : 'Persistência local (SQLite)'}
           </h2>
           <dl className="mt-3 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
             <div>

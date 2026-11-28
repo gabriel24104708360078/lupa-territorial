@@ -4,18 +4,24 @@
  */
 
 import express, { type Express, type Request, type Response } from 'express';
-import { type DatabaseSync } from 'node:sqlite';
+import type { AppDatabase } from '../db/client.ts';
 import { openDatabase, runMigrations } from '../db/schema.ts';
 import { ensureStateDataLoaded, ensureStatesList } from '../services/externalData.ts';
 
-let sharedDb: DatabaseSync | null = null;
+let sharedDbPromise: Promise<AppDatabase> | null = null;
 
-function getDatabase(): DatabaseSync {
-  if (!sharedDb) {
-    sharedDb = openDatabase();
-    runMigrations(sharedDb);
+function getDatabase(): Promise<AppDatabase> {
+  if (!sharedDbPromise) {
+    sharedDbPromise = (async () => {
+      const db = await openDatabase();
+      await runMigrations(db);
+      return db;
+    })().catch((err) => {
+      sharedDbPromise = null;
+      throw err;
+    });
   }
-  return sharedDb;
+  return sharedDbPromise;
 }
 
 export function createApiApp(): Express {
@@ -31,19 +37,19 @@ export function createApiApp(): Express {
   // Lista todas as UFs disponíveis (e eventual estado fictício de teste se seedado)
   router.get('/states', async (_req: Request, res: Response) => {
     try {
-      const db = getDatabase();
+      const db = await getDatabase();
       const { states, isOffline, collectedAt } = await ensureStatesList(db);
       res.json({
         isOffline,
         collectedAt,
-        hasTestData: states.some((s) => s.is_teste === 1),
+        hasTestData: states.some((s) => Number(s.is_teste) === 1),
         states: states.map((s) => ({
-          id: s.id,
+          id: Number(s.id),
           sigla: s.sigla,
           nome: s.nome,
           regiao: s.regiao,
-          isOffline: s.is_offline === 1,
-          isTeste: s.is_teste === 1,
+          isOffline: Number(s.is_offline) === 1,
+          isTeste: Number(s.is_teste) === 1,
           collectedAt: s.collected_at,
         })),
       });
@@ -62,82 +68,82 @@ export function createApiApp(): Express {
     }
 
     try {
-      const db = getDatabase();
+      const db = await getDatabase();
       const status = await ensureStateDataLoaded(db, stateId);
 
-      const stateRow = db
-        .prepare('SELECT id, sigla, nome, regiao, malha_geojson, collected_at, is_offline, is_teste FROM states WHERE id = ?')
-        .get(stateId) as {
-          id: number;
-          sigla: string;
-          nome: string;
-          regiao: string;
-          malha_geojson: string | null;
-          collected_at: string;
-          is_offline: number;
-          is_teste: number;
-        } | undefined;
+      const stateRow = await db.queryOne<{
+        id: number;
+        sigla: string;
+        nome: string;
+        regiao: string;
+        malha_geojson: string | null;
+        collected_at: string;
+        is_offline: number;
+        is_teste: number;
+      }>('SELECT id, sigla, nome, regiao, malha_geojson, collected_at, is_offline, is_teste FROM states WHERE id = ?', [
+        stateId,
+      ]);
 
       if (!stateRow) {
         res.status(404).json({ error: 'Estado não encontrado.' });
         return;
       }
 
-      const indicators = db
-        .prepare(`
-          SELECT code, nome, nome_curto, unidade, fonte, tabela_codigo, variavel_codigo,
-                 classificacao, ano_referencia, incluir_no_indice, maior_e_melhor,
-                 peso_padrao, source_url, descricao
-          FROM indicators
-          ORDER BY incluir_no_indice DESC, peso_padrao DESC, ano_referencia DESC
-        `)
-        .all() as Array<{
-          code: string;
-          nome: string;
-          nome_curto: string;
-          unidade: string;
-          fonte: string;
-          tabela_codigo: string;
-          variavel_codigo: string;
-          classificacao: string | null;
-          ano_referencia: number;
-          incluir_no_indice: number;
-          maior_e_melhor: number;
-          peso_padrao: number;
-          source_url: string;
-          descricao: string;
-        }>;
+      const indicators = await db.queryAll<{
+        code: string;
+        nome: string;
+        nome_curto: string;
+        unidade: string;
+        fonte: string;
+        tabela_codigo: string;
+        variavel_codigo: string;
+        classificacao: string | null;
+        ano_referencia: number;
+        incluir_no_indice: number;
+        maior_e_melhor: number;
+        peso_padrao: number;
+        source_url: string;
+        descricao: string;
+      }>(`
+        SELECT code, nome, nome_curto, unidade, fonte, tabela_codigo, variavel_codigo,
+               classificacao, ano_referencia, incluir_no_indice, maior_e_melhor,
+               peso_padrao, source_url, descricao
+        FROM indicators
+        ORDER BY incluir_no_indice DESC, peso_padrao DESC, ano_referencia DESC
+      `);
 
-      const municipalities = db
-        .prepare(`
+      const municipalities = await db.queryAll<{
+        id: string;
+        nome: string;
+        microrregiao: string | null;
+        regiao_imediata: string | null;
+        is_teste: number;
+      }>(
+        `
           SELECT id, nome, microrregiao, regiao_imediata, is_teste
           FROM municipalities
           WHERE state_id = ?
           ORDER BY nome ASC
-        `)
-        .all(stateId) as Array<{
-          id: string;
-          nome: string;
-          microrregiao: string | null;
-          regiao_imediata: string | null;
-          is_teste: number;
-        }>;
+        `,
+        [stateId],
+      );
 
-      const valuesRows = db
-        .prepare(`
+      const valuesRows = await db.queryAll<{
+        municipality_id: string;
+        indicator_code: string;
+        ano: number;
+        valor: number | null;
+        source_mode: string;
+      }>(
+        `
           SELECT iv.municipality_id, iv.indicator_code, iv.ano, iv.valor, iv.source_mode
           FROM indicator_values iv
           JOIN municipalities m ON m.id = iv.municipality_id
           WHERE m.state_id = ?
           ORDER BY iv.ano ASC
-        `)
-        .all(stateId) as Array<{
-          municipality_id: string;
-          indicator_code: string;
-          ano: number;
-          valor: number | null;
-          source_mode: string;
-        }>;
+        `,
+        [stateId],
+      );
 
       const byMun: Record<
         string,
@@ -161,30 +167,33 @@ export function createApiApp(): Express {
         const entry = byMun[row.municipality_id];
         if (!entry) continue;
 
+        const anoNum = Number(row.ano);
+        const valNum = row.valor === null || row.valor === undefined ? null : Number(row.valor);
+
         const current = entry.values[row.indicator_code];
-        if (!current || row.ano >= current.ano) {
-          entry.values[row.indicator_code] = { valor: row.valor, ano: row.ano };
+        if (!current || anoNum >= current.ano) {
+          entry.values[row.indicator_code] = { valor: valNum, ano: anoNum };
         }
 
         if (
           (row.indicator_code === 'populacao' || row.indicator_code === 'bolsa_familia_taxa') &&
-          typeof row.valor === 'number' &&
-          Number.isFinite(row.valor)
+          typeof valNum === 'number' &&
+          Number.isFinite(valNum)
         ) {
-          entry.trends[row.indicator_code].push({ ano: row.ano, valor: row.valor });
+          entry.trends[row.indicator_code].push({ ano: anoNum, valor: valNum });
         }
       }
 
       res.json({
         state: {
-          id: stateRow.id,
+          id: Number(stateRow.id),
           sigla: stateRow.sigla,
           nome: stateRow.nome,
           regiao: stateRow.regiao,
           collectedAt: status.collectedAt,
           isOffline: status.isOffline,
           offlineIndicators: status.offlineIndicators,
-          isTeste: status.isTeste || stateRow.is_teste === 1,
+          isTeste: status.isTeste || Number(stateRow.is_teste) === 1,
         },
         indicators: indicators.map((ind) => ({
           code: ind.code,
@@ -195,10 +204,10 @@ export function createApiApp(): Express {
           tabelaCodigo: ind.tabela_codigo,
           variavelCodigo: ind.variavel_codigo,
           classificacao: ind.classificacao,
-          anoReferencia: ind.ano_referencia,
-          incluirNoIndice: ind.incluir_no_indice === 1,
-          maiorEMelhor: ind.maior_e_melhor === 1,
-          pesoPadrao: ind.peso_padrao,
+          anoReferencia: Number(ind.ano_referencia),
+          incluirNoIndice: Number(ind.incluir_no_indice) === 1,
+          maiorEMelhor: Number(ind.maior_e_melhor) === 1,
+          pesoPadrao: Number(ind.peso_padrao),
           sourceUrl: ind.source_url,
           descricao: ind.descricao,
         })),
@@ -207,7 +216,7 @@ export function createApiApp(): Express {
           nome: m.nome,
           microrregiao: m.microrregiao,
           regiaoImediata: m.regiao_imediata,
-          isTeste: m.is_teste === 1,
+          isTeste: Number(m.is_teste) === 1,
           values: byMun[m.id]?.values || {},
           trends: byMun[m.id]?.trends || { populacao: [], bolsa_familia_taxa: [] },
         })),
@@ -223,24 +232,43 @@ export function createApiApp(): Express {
     }
   });
 
-  // Metadados gerais e estatísticas do cache SQLite para a página "Sobre os dados"
-  router.get('/about', (_req: Request, res: Response) => {
-    const db = getDatabase();
-    const indicators = db
-      .prepare('SELECT code, nome, nome_curto, unidade, fonte, tabela_codigo, variavel_codigo, classificacao, ano_referencia, incluir_no_indice, maior_e_melhor, peso_padrao, source_url, descricao FROM indicators')
-      .all();
-    const stats = db
-      .prepare(`
+  // Metadados gerais e estatísticas do cache (SQLite local ou PostgreSQL) para a página "Sobre os dados"
+  router.get('/about', async (_req: Request, res: Response) => {
+    try {
+      const db = await getDatabase();
+      const indicators = await db.queryAll(
+        'SELECT code, nome, nome_curto, unidade, fonte, tabela_codigo, variavel_codigo, classificacao, ano_referencia, incluir_no_indice, maior_e_melhor, peso_padrao, source_url, descricao FROM indicators',
+      );
+      const rawStats = await db.queryOne<{
+        cachedStates: number | string;
+        cachedMunicipalities: number | string;
+        cachedValues: number | string;
+        testValues: number | string;
+        lastCollectedAt: string | null;
+      }>(`
         SELECT
-          (SELECT COUNT(*) FROM states WHERE is_teste = 0 AND malha_geojson IS NOT NULL) as cachedStates,
-          (SELECT COUNT(*) FROM municipalities WHERE is_teste = 0) as cachedMunicipalities,
-          (SELECT COUNT(*) FROM indicator_values WHERE is_teste = 0) as cachedValues,
-          (SELECT COUNT(*) FROM indicator_values WHERE is_teste = 1) as testValues,
-          (SELECT MAX(collected_at) FROM states WHERE is_teste = 0) as lastCollectedAt
-      `)
-      .get();
+          (SELECT COUNT(*) FROM states WHERE is_teste = 0 AND malha_geojson IS NOT NULL) AS "cachedStates",
+          (SELECT COUNT(*) FROM municipalities WHERE is_teste = 0) AS "cachedMunicipalities",
+          (SELECT COUNT(*) FROM indicator_values WHERE is_teste = 0) AS "cachedValues",
+          (SELECT COUNT(*) FROM indicator_values WHERE is_teste = 1) AS "testValues",
+          (SELECT MAX(collected_at) FROM states WHERE is_teste = 0) AS "lastCollectedAt"
+      `);
 
-    res.json({ indicators, stats });
+      res.json({
+        dialect: db.dialect,
+        indicators,
+        stats: {
+          cachedStates: Number(rawStats?.cachedStates ?? 0),
+          cachedMunicipalities: Number(rawStats?.cachedMunicipalities ?? 0),
+          cachedValues: Number(rawStats?.cachedValues ?? 0),
+          testValues: Number(rawStats?.testValues ?? 0),
+          lastCollectedAt: rawStats?.lastCollectedAt ?? null,
+        },
+      });
+    } catch (err) {
+      console.error('Erro em GET /api/about:', err);
+      res.status(500).json({ error: 'Não foi possível consultar os metadados do banco.' });
+    }
   });
 
   app.use('/api', router);

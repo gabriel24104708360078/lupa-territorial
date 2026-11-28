@@ -14,7 +14,8 @@ Comparar condições socioeconômicas e de infraestrutura entre municípios exig
 - Seleção de qualquer uma das **27 UFs** e até **3 municípios**;
 - **Índice composto (0 a 1)** normalizado por min-máx entre os municípios do estado (onde `1 = mais vulnerável do estado`), com pesos editáveis em tempo real, fórmula visível e botão **"Restaurar pesos"**;
 - **Gráfico de radar** e **tabela comparativa** com ano de referência e botão **"De onde vem"** em cada valor;
-- **Mapa coroplético estadual** (Leaflet) colorido em tempo real pelo índice;
+- **Mapa coroplético estadual** (Leaflet) colorido em tempo real pelo índice em escala sequencial de um só matiz;
+- **Análise de sensibilidade** do ranking estadual (posição atual vs. retirada de cada indicador com peso 0);
 - **Gráfico de tendência histórica** (população e Bolsa Família);
 - **Alternativas em texto** para gráficos e mapa, navegação por teclado, foco visível e contraste WCAG AA;
 - **Plano B offline** completo para as **27 UFs** em `data/`.
@@ -23,24 +24,26 @@ Comparar condições socioeconômicas e de infraestrutura entre municípios exig
 
 ## 2. Fontes de Dados Oficiais (Testadas)
 
-### A. IBGE Localidades e Malhas
-- **Estados:** `GET https://servicodados.ibge.gov.br/api/v1/localidades/estados` (Nível: UF)
-- **Municípios por UF:** `GET https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios` (Nível: Município `N6`)
-- **Malha municipal (GeoJSON):** `GET https://servicodados.ibge.gov.br/api/v3/malhas/estados/{uf}?intrarregiao=municipio&formato=application/vnd.geo+json&qualidade=minima`
+> **Classificação de nível da fonte:** **A** = API REST aberta sem cadastro · **B** = API com chave · **C** = arquivo CSV · **D** = acesso restrito. Todas as fontes utilizadas neste projeto são **Nível A**.
+
+### A. IBGE Localidades e Malhas — Nível da fonte: **A**
+- **Estados:** `GET https://servicodados.ibge.gov.br/api/v1/localidades/estados` (Nível territorial: UF · Nível da fonte: **A**)
+- **Municípios por UF:** `GET https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios` (Nível territorial: Município `N6` · Nível da fonte: **A**)
+- **Malha municipal (GeoJSON):** `GET https://servicodados.ibge.gov.br/api/v3/malhas/estados/{uf}?intrarregiao=municipio&formato=application/vnd.geo+json&qualidade=minima` (Nível da fonte: **A**)
   - Campo chave de ligação: `features[].properties.codarea` (código IBGE de 7 dígitos).
 
-### B. IBGE Agregados / SIDRA (`https://servicodados.ibge.gov.br/api/v3/agregados/{tabela}/periodos/{periodo}/variaveis/{variavel}`)
+### B. IBGE Agregados / SIDRA — Nível da fonte: **A** (`https://servicodados.ibge.gov.br/api/v3/agregados/{tabela}/periodos/{periodo}/variaveis/{variavel}`)
 
-| Indicador | Tabela | Variável | Classificação | Período | Nível | Uso no Índice |
-|---|---:|---:|---|---|---|---|
-| Renda domiciliar per capita média | `10295` | `13431` | `2[6794]\|86[95251]\|58[95253]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
-| Taxa de alfabetização (15+ anos) | `9543` | `2513` | `2[6794]\|86[95251]\|287[100362]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
-| Água por rede geral (forma principal) | `6803` | `1000381` | `1821[72144]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
-| Esgotamento sanitário (rede ou fossa ligada) | `6805` | `1000381` | `11558[46290]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
-| Coleta de lixo (lixo coletado) | `6892` | `1000381` | `67[2520]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
-| População residente (Censo) | `4714` | `93` | — | `2022` | `N6` (Município) | Contexto + denominador |
-| Domicílios particulares ocupados | `4712` | `381` | — | `2022` | `N6` (Município) | Apenas contexto |
-| Estimativa da população (tendência) | `6579` | `9324` | — | `2018\|2019\|2020\|2021\|2024\|2025` | `N6` (Município) | Gráfico histórico |
+| Indicador | Nível da fonte | Tabela | Variável | Classificação | Período | Nível territorial | Uso no Índice |
+|---|---|---|---|---|---|---:|---|
+| Renda domiciliar per capita média | **A** | `10295` | `13431` | `2[6794]\|86[95251]\|58[95253]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
+| Taxa de alfabetização (15+ anos) | **A** | `9543` | `2513` | `2[6794]\|86[95251]\|287[100362]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
+| Água por rede geral (forma principal) | **A** | `6803` | `1000381` | `1821[72144]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
+| Esgotamento sanitário (rede ou fossa ligada) | **A** | `6805` | `1000381` | `11558[46290]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
+| Coleta de lixo (lixo coletado) | **A** | `6892` | `1000381` | `67[2520]` | `2022` | `N6` (Município) | Peso padrão `1` (invertido) |
+| População residente (Censo) | **A** | `4714` | `93` | — | `2022` | `N6` (Município) | Contexto + denominador |
+| Domicílios particulares ocupados | **A** | `4712` | `381` | — | `2022` | `N6` (Município) | Apenas contexto |
+| Estimativa da população (tendência) | **A** | `6579` | `9324` | — | `2018\|2019\|2020\|2021\|2024\|2025` | `N6` (Município) | Gráfico histórico |
 
 **Exemplo real de resposta (Tabela `6803`, Angra dos Reis - RJ):**
 ```json
@@ -63,10 +66,10 @@ Comparar condições socioeconômicas e de infraestrutura entre municípios exig
 ]
 ```
 
-### C. Ipeadata OData (`https://www.ipeadata.gov.br/api/odata4/ValoresSerie(SERCODIGO='...')`)
-- **`FAM_PBF`** — Programa Bolsa Família (número de benefícios em dezembro, 2004–2025, nível `Municípios`). Convertido no servidor para **benefícios por 1.000 habitantes**. Peso padrão `1` (direto: maior valor = maior vulnerabilidade).
-- **`ADH_IDHM`** — IDHM (Censo 1991, 2000, 2010, nível `Municípios`). Peso padrão `0` por ser de **2010**.
-- **`ADH_PPOB`** — Proporção de vulneráveis à pobreza (Censo 1991, 2000, 2010, nível `Municípios`). Peso padrão `0` por ser de **2010**.
+### C. Ipeadata OData — Nível da fonte: **A** (`https://www.ipeadata.gov.br/api/odata4/ValoresSerie(SERCODIGO='...')`)
+- **`FAM_PBF`** — Programa Bolsa Família (número de benefícios em dezembro, 2004–2025, nível territorial `Municípios` · nível da fonte **A**). Convertido no servidor para **benefícios por 1.000 habitantes**. Peso padrão `1` (direto: maior valor = maior vulnerabilidade).
+- **`ADH_IDHM`** — IDHM (Censo 1991, 2000, 2010, nível territorial `Municípios` · nível da fonte **A**). Peso padrão `0` por ser de **2010**.
+- **`ADH_PPOB`** — Proporção de vulneráveis à pobreza (Censo 1991, 2000, 2010, nível territorial `Municípios` · nível da fonte **A**). Peso padrão `0` por ser de **2010**.
 - **`AVS_IVS` (limitação verificada):** existe apenas para `Brasil`, `Regiões` e `Estados` (`0` registros municipais). Esse limite é informado na tela principal e em "Sobre os dados".
 
 **Exemplo real de resposta (`FAM_PBF`):**
@@ -84,9 +87,9 @@ Comparar condições socioeconômicas e de infraestrutura entre municípios exig
 
 ## 3. Banco de Dados e Esquema Relacional
 
-### Escolha do banco
-- **Localmente:** **SQLite** (via módulo nativo `node:sqlite` do Node.js 22), por dispensar instalação de servidor externo, rodar em arquivo único (`data/lupa_territorial.sqlite`) e facilitar a avaliação acadêmica pelos estudantes.
-- **Para publicação em produção:** recomenda-se **PostgreSQL** (ex.: Cloud SQL), pois permite múltiplas réplicas de aplicação compartilharem o mesmo estado persistente sem bloqueio de arquivo local.
+### Escolha do banco e interface única (`src/db/client.ts`)
+- **Localmente (quando `DATABASE_URL` não existe):** **SQLite** (via módulo nativo `node:sqlite` do Node.js 22), por dispensar instalação de servidor externo, gravar em arquivo único (`data/lupa_territorial.sqlite`) e facilitar a execução imediata pelos estudantes.
+- **Na publicação (quando `DATABASE_URL` existe):** **PostgreSQL** gerenciado (**Neon** conectado pelo **Marketplace da Vercel** via pacote `pg`). **Por quê:** funções serverless do Vercel têm disco local efêmero (`/tmp`); usar PostgreSQL com `DATABASE_URL` garante persistência definitiva do cache e do histórico entre *cold starts* e múltiplas instâncias, mantendo exatamente o mesmo esquema relacional (5 tabelas, PK/FK, `is_teste`, data de coleta e histórico) e migrations automáticas por trás da interface única `AppDatabase` (`src/db/client.ts`). A URL de conexão fica exclusivamente na variável de ambiente `DATABASE_URL` no servidor, nunca no código ou no front-end.
 
 ### Esquema (`src/db/schema.ts`)
 
@@ -101,18 +104,25 @@ ipeadata_cache (PK composta: series_code, municipality_id, ano)
 1. `states`: `id` (PK), `sigla`, `nome`, `regiao`, `malha_geojson`, `collected_at`, `is_offline`, `is_teste`.
 2. `municipalities`: `id` (PK IBGE 7 dígitos), `state_id` (FK -> `states.id`), `nome`, `microrregiao`, `regiao_imediata`, `is_teste`.
 3. `indicators`: `code` (PK), `nome`, `nome_curto`, `unidade`, `fonte`, `tabela_codigo`, `variavel_codigo`, `classificacao`, `ano_referencia`, `incluir_no_indice`, `maior_e_melhor`, `peso_padrao`, `source_url`, `descricao`.
-4. `indicator_values`: `id` (PK), `municipality_id` (FK -> `municipalities.id`), `indicator_code` (FK -> `indicators.code`), `ano`, `valor`, `collected_at`, `source_mode`, `is_teste`.
+4. `indicator_values`: `id` (PK `AUTOINCREMENT` no SQLite / `SERIAL` no PostgreSQL), `municipality_id` (FK -> `municipalities.id`), `indicator_code` (FK -> `indicators.code`), `ano`, `valor`, `collected_at`, `source_mode`, `is_teste`.
 5. `ipeadata_cache`: cache único no servidor para séries completas do Ipeadata filtradas para o nível municipal.
+
+### Quantidade de linhas geradas pelo seed de teste (`npm run db:seed-test`)
+- `states` (`is_teste = 1`): **1 linha** (estado fictício `ZT`, `id = 99`).
+- `municipalities` (`is_teste = 1`): **3 linhas** (`9900001`, `9900002`, `9900003`).
+- `indicator_values` (`is_teste = 1`): **48 linhas** (`16` linhas por município: `9` indicadores pontuais + `7` anos da série histórica de população `2018–2025`).
+- `indicators` (catálogo oficial garantido pela migração): **10 linhas** (`0` exclusivas de teste).
+- `ipeadata_cache`: **0 linhas**.
 
 ---
 
 ## 4. Como Rodar
 
 ```bash
-# 1. Instalar dependências
+# 1. Instalar dependências (sem --legacy-peer-deps)
 npm install
 
-# 2. Criar/atualizar tabelas SQLite
+# 2. Criar/atualizar tabelas (SQLite local ou PostgreSQL se DATABASE_URL estiver definida)
 npm run db:migrate
 
 # 3. Iniciar servidor Express + React em modo desenvolvimento (porta 3000)
@@ -120,10 +130,11 @@ npm run dev
 ```
 
 ### Outros comandos úteis
-- `npm test` — Executa os testes unitários da normalização min-máx e cálculo do índice (`tests/indexCalculator.test.ts`).
+- `npm test` — Executa os testes unitários da normalização min-máx, cálculo do índice e análise de sensibilidade (`tests/indexCalculator.test.ts`).
+- `npm run lint` — Verifica a tipagem TypeScript (`tsc --noEmit`).
 - `npm run data:fetch` — Baixa novamente as amostras reais das 27 UFs (incluindo malhas GeoJSON) e séries do Ipeadata para `data/`.
-- `npm run db:seed-test` — Insere o estado fictício `ZT` (`is_teste = 1`, idempotente).
-- `npm run db:clean-test` — Remove **apenas** os registros de teste (`WHERE is_teste = 1`).
+- `npm run db:seed-test` — Insere o estado fictício `ZT` (`is_teste = 1`, idempotente) e imprime no terminal as linhas geradas por tabela.
+- `npm run db:clean-test` — Remove **apenas** os registros de teste (`WHERE is_teste = 1`) e imprime as linhas removidas por tabela.
 - `npm run build` e `npm start` — Gera build de produção e sobe o servidor Node.
 
 ---
@@ -135,13 +146,12 @@ npm run dev
    - `buildCommand`: `"npm run build"` e `outputDirectory`: `"dist"`
    - `functions["api/index.ts"]`: `includeFiles: "data/**"` (com `.vercelignore` excluindo `data/*.sqlite*`) e `maxDuration: 60`
    - `rewrites`: `/api/(.*)` redireciona para `/api/index` e as demais rotas caem em `/index.html`
-2. Não é necessário configurar chaves de API nem `GEMINI_API_KEY`, pois todas as fontes são públicas e o app não usa IA.
+2. No painel do projeto na Vercel, conecte um banco **Neon (PostgreSQL)** pelo **Vercel Marketplace** para que a variável de ambiente **`DATABASE_URL`** seja injetada automaticamente no servidor (sem gravar credenciais no repositório). Não é necessário configurar chaves de API nem `GEMINI_API_KEY`, pois todas as fontes são públicas e o app não usa IA.
 
-### Como funciona o SQLite (`node:sqlite`) no Vercel (`/tmp`)
-- No runtime **Node 22 (`nodejs22.x`)** do Vercel, o módulo nativo `node:sqlite` (`DatabaseSync`) funciona diretamente sem compilação C++ (`node-gyp`), porém o sistema de arquivos da aplicação é **somente leitura**, exceto pelo diretório temporário **`/tmp`**.
-- Quando a variável de ambiente `VERCEL` existe, o servidor grava o banco SQLite automaticamente em **`/tmp/lupa_territorial.sqlite`**.
-- **Consultas ao vivo e plano B granular:** em *cold starts* ou reciclagem de instâncias, `/tmp` começa vazio; o servidor recria as tabelas, dispara as chamadas ao IBGE (Localidades, Malhas e SIDRA) e ao Ipeadata em paralelo (`Promise.all`, com tempo-limite de **25 s** por requisição) e só recorre às amostras em `data/` caso alguma fonte realmente falhe ou estoure o limite. Se o IBGE responder ao vivo e apenas um indicador do Ipeadata falhar, apenas aquele indicador usa a amostra local com aviso explícito na tela, sem marcar o estado inteiro como offline; se o IBGE falhar, exibe **"Dados de &lt;data&gt; (modo offline)"**.
-- Para persistência definitiva multi-instância fora do `/tmp`, recomenda-se conectar um banco gerenciado externo (**PostgreSQL**).
+### Como funciona a persistência na publicação (PostgreSQL via `DATABASE_URL` e fallback `/tmp`)
+- Quando **`DATABASE_URL`** está definida (ex.: Neon PostgreSQL na Vercel), o servidor executa automaticamente as migrations das 5 tabelas no PostgreSQL e persiste cache e histórico de forma definitiva entre chamadas serverless.
+- Caso `DATABASE_URL` não esteja definida na Vercel (`VERCEL` presente), o servidor usa o SQLite nativo (`node:sqlite`, compatível com `nodejs22.x` sem compilação C++) em **`/tmp/lupa_territorial.sqlite`**, com limitação de disco efêmero em *cold starts*.
+- **Consultas ao vivo e plano B granular:** quando o cache para uma UF ainda está vazio ou expirado, o servidor dispara as chamadas ao IBGE (Localidades, Malhas e SIDRA) e ao Ipeadata em paralelo (`Promise.all`, com tempo-limite de **25 s** por requisição) e só recorre às amostras em `data/` caso alguma fonte realmente falhe ou estoure o limite. Se o IBGE responder ao vivo e apenas um indicador do Ipeadata falhar, apenas aquele indicador usa a amostra local com aviso explícito na tela, sem marcar o estado inteiro como offline; se o IBGE falhar, exibe **"Dados de &lt;data&gt; (modo offline)"**.
 
 ---
 
@@ -167,12 +177,49 @@ npm run dev
 4. **Filtro do Ipeadata no servidor:** como o parâmetro `$filter` da API OData do Ipeadata falhou/excedeu o tempo nos testes iniciais, o servidor baixa cada série uma vez, filtra `NIVNOME === 'Municípios'` em Node.js e grava em cache na tabela `ipeadata_cache`.
 5. **Troca de plataforma de publicação (Netlify → Vercel):** removidos `netlify.toml`, `netlify/functions/` e `serverless-http`; criada a função `api/index.ts` e o `vercel.json` reaproveitando o mesmo módulo Express (`src/server/apiApp.ts`) com `node:sqlite` gravando em `/tmp` quando `VERCEL` está definida.
 6. **Correção do modo offline por tempo-limite no Vercel:** como os tempos-limite iniciais (`6,5 s` e `7,5 s`) faziam `/api/states/33/overview` cair no plano B em produção, o `vercel.json` passou a usar `"regions": ["gru1"]` e `"maxDuration": 60`, os tempos-limite externos foram ampliados para `25 s`, todas as chamadas SIDRA e Ipeadata passaram a executar em paralelo (`Promise.all`) e o fallback tornou-se granular por indicador (se apenas um indicador do Ipeadata falhar e o IBGE responder ao vivo, somente esse indicador vem de `data/`, com aviso específico na interface).
+7. **Instalação limpa com `npm install`:** atualizado `esbuild` de `^0.25.0` para `^0.28.0` (compatível com `vite ^8.3.0`), renomeado o pacote para `lupa-territorial` e removido `bun.lock` para que `npm install` execute sem `--legacy-peer-deps`.
+8. **Banco persistente na publicação (PostgreSQL/Neon):** criada a interface única `AppDatabase` (`src/db/client.ts`) que usa PostgreSQL (`pg`) com migrations automáticas e upserts em lote quando `DATABASE_URL` está definida (Neon via Vercel Marketplace) e mantém SQLite local sem `DATABASE_URL`.
+9. **Análise de sensibilidade e escala sequencial do mapa:** adicionada a tabela acessível de variação de posição no ranking estadual ao retirar cada indicador (`peso = 0`), com teste unitário dedicado, e ajustada a paleta do mapa para uma escala sequencial de um só matiz (Teal claro ao escuro) com borda tracejada para áreas sem dado.
 
 ### Prompts principais utilizados (em ordem cronológica, na íntegra)
 
 #### 1) Prompt inicial (BLOCO COMUM + Prompt do MVP do sistema 6)
 ```text
-PAPEL E MODO DE TRABALHOVocê é um engenheiro full-stack sênior ajudando uma dupla de estudantes de Programação Web.Antes de escrever código: (1) liste suas suposições; (2) teste cada endpoint ou arquivo de dados informado e mostre a resposta real (status e campos principais); (3) se algo não existir ou falhar, PARE e me avise. Não invente endpoints, campos ou dados.Trabalhe em etapas pequenas e explique cada arquivo criado em 2 linhas, para que os estudantes consigam defender o código.REGRAS GERAIS- Português do Brasil, mobile first, acessível: contraste AA, rótulos nos campos, foco visível, navegação completa por teclado, alternativa em texto para gráficos e mapas. Nunca usar só cor para indicar nível.- Plano B: guardar amostras reais em data/ e usá-las quando a fonte falhar, com o aviso visível "Dados de <data> (modo offline)".- Toda tela mostra "Fonte: <nome>, atualizado em <data>". Criar a página "Sobre os dados" (fontes, limitações, avisos).- Privacidade: não coletar, gravar nem enviar dado pessoal; sem cookies de rastreio, sem login, sem analytics. Usar só dados agregados.- Banco de dados obrigatório: criar esquema com no mínimo 3 tabelas relacionadas (PK e FK) e script de criação e carga (migrations ou seed). O servidor consulta as APIs, grava o resultado no banco com data de coleta (cache) e o front-end lê do banco. Guardar histórico para gráficos de tendência. Só dados públicos e agregados, sem dado pessoal. Mostrar o esquema no README. Para rodar localmente, SQLite; para publicar, banco persistente (PostgreSQL ou Firestore). Informe qual banco escolheu e por quê.- Aviso fixo no rodapé: "Informativo. Não substitui atendimento de saúde. Emergência: SAMU 192."- Chaves e segredos só no servidor, por variável de ambiente; nunca no front-end nem no repositório.- Toda tela trata carregando, vazio e erro. Código simples, com comentários onde houver regra de negócio.- Entregar README com: problema, fontes (URL, nível, exemplo de resposta), como rodar, decisões e limitações conhecidas.SISTEMA: Lupa Territorial. Retrato social de municípios com índice composto transparente.PÚBLICO: gestores, pesquisadores, estudantes, conselhos.STACK: React + servidor Node do ambiente (junta as chamadas às APIs); Leaflet; gráfico de radar.DADOS (testar antes; registrar no README o número de cada tabela e variável):- Municípios e malhas: IBGE Localidades e Malhas.- Indicadores: API Agregados/SIDRA do IBGE (Censo 2022): população, domicílios, abastecimento de água por rede, esgotamento sanitário, alfabetização. Formato: https://servicodados.ibge.gov.br/api/v3/agregados/{tabela}/periodos/{periodo}/variaveis/{variavel} Localize as tabelas corretas na documentação e me mostre antes de usar.- Renda e vulnerabilidade: API OData do Ipeadata, quando houver série municipal; se não houver, dizer isso na tela.TELAS DO MVP:1) Seleção de até 3 municípios.2) Comparativo: radar, tabela e valores com ano de referência.3) Índice composto: normalização 0 a 1 (mín-máx entre os municípios do estado) e pesos editáveis na tela, com a fórmula visível e um botão "restaurar pesos".4) Mapa coroplético do estado pelo índice.5) Cada número tem um botão "de onde vem" com tabela, variável, ano e link.REGRAS: nunca afirmar causalidade; o índice é uma ferramenta de comparação, não um diagnóstico.CRITÉRIOS DE ACEITE: índice recalcula em tempo real ao mudar pesos; teste unitário da normalização.FORA DO ESCOPO: dados por bairro, previsões.
+PAPEL E MODO DE TRABALHO
+Você é um engenheiro full-stack sênior ajudando uma dupla de estudantes de Programação Web.
+Antes de escrever código: (1) liste suas suposições; (2) teste cada endpoint ou arquivo de dados informado e mostre a resposta real (status e campos principais); (3) se algo não existir ou falhar, PARE e me avise. Não invente endpoints, campos ou dados.
+Trabalhe em etapas pequenas e explique cada arquivo criado em 2 linhas, para que os estudantes consigam defender o código.
+
+REGRAS GERAIS
+- Português do Brasil, mobile first, acessível: contraste AA, rótulos nos campos, foco visível, navegação completa por teclado, alternativa em texto para gráficos e mapas. Nunca usar só cor para indicar nível.
+- Plano B: guardar amostras reais em data/ e usá-las quando a fonte falhar, com o aviso visível "Dados de <data> (modo offline)".
+- Toda tela mostra "Fonte: <nome>, atualizado em <data>". Criar a página "Sobre os dados" (fontes, limitações, avisos).
+- Privacidade: não coletar, gravar nem enviar dado pessoal; sem cookies de rastreio, sem login, sem analytics. Usar só dados agregados.
+- Banco de dados obrigatório: criar esquema com no mínimo 3 tabelas relacionadas (PK e FK) e script de criação e carga (migrations ou seed). O servidor consulta as APIs, grava o resultado no banco com data de coleta (cache) e o front-end lê do banco. Guardar histórico para gráficos de tendência. Só dados públicos e agregados, sem dado pessoal. Mostrar o esquema no README. Para rodar localmente, SQLite; para publicar, banco persistente (PostgreSQL ou Firestore). Informe qual banco escolheu e por quê.
+- Aviso fixo no rodapé: "Informativo. Não substitui atendimento de saúde. Emergência: SAMU 192."
+- Chaves e segredos só no servidor, por variável de ambiente; nunca no front-end nem no repositório.
+- Toda tela trata carregando, vazio e erro. Código simples, com comentários onde houver regra de negócio.
+- Entregar README com: problema, fontes (URL, nível, exemplo de resposta), como rodar, decisões e limitações conhecidas.
+
+SISTEMA: Lupa Territorial. Retrato social de municípios com índice composto transparente.
+PÚBLICO: gestores, pesquisadores, estudantes, conselhos.
+STACK: React + servidor Node do ambiente (junta as chamadas às APIs); Leaflet; gráfico de radar.
+
+DADOS (testar antes; registrar no README o número de cada tabela e variável):
+- Municípios e malhas: IBGE Localidades e Malhas.
+- Indicadores: API Agregados/SIDRA do IBGE (Censo 2022): população, domicílios, abastecimento de água por rede, esgotamento sanitário, alfabetização. Formato: https://servicodados.ibge.gov.br/api/v3/agregados/{tabela}/periodos/{periodo}/variaveis/{variavel} Localize as tabelas corretas na documentação e me mostre antes de usar.
+- Renda e vulnerabilidade: API OData do Ipeadata, quando houver série municipal; se não houver, dizer isso na tela.
+
+TELAS DO MVP:
+1) Seleção de até 3 municípios.
+2) Comparativo: radar, tabela e valores com ano de referência.
+3) Índice composto: normalização 0 a 1 (mín-máx entre os municípios do estado) e pesos editáveis na tela, com a fórmula visível e um botão "restaurar pesos".
+4) Mapa coroplético do estado pelo índice.
+5) Cada número tem um botão "de onde vem" com tabela, variável, ano e link.
+
+REGRAS: nunca afirmar causalidade; o índice é uma ferramenta de comparação, não um diagnóstico.
+CRITÉRIOS DE ACEITE: índice recalcula em tempo real ao mudar pesos; teste unitário da normalização.
+FORA DO ESCOPO: dados por bairro, previsões.
 ```
 
 #### 2) Aprovação da Etapa 1 com ajustes
@@ -226,4 +273,33 @@ Duas tarefas:
 
 Rode build, testes e lint e me mostre o resultado.
 ```
+
+#### 6) Informação do link do repositório GitHub
+```text
+O repositório é https://github.com/gabriel24104708360078/lupa-territorial . Substitua o <URL_DO_REPOSITORIO_GITHUB> do README por esse link. Não mude mais nada.
+```
+
+#### 7) Revisão final contra o PDF da atividade (npm install, PostgreSQL, sensibilidade, mapa, seed e README)
+```text
+Revisei o projeto contra o PDF da atividade e faltam estes pontos. Corrija todos, sem mudar o que já funciona:
+
+1) INSTALAÇÃO: "npm install" falha com ERESOLVE (esbuild ^0.25 conflita com vite 8, que pede esbuild ^0.27 || ^0.28). Ajuste as versões para que "npm install" funcione sem --legacy-peer-deps. Troque o "name" do package.json de "react-example" para "lupa-territorial". Remova o bun.lock se ele não for necessário, para o README valer com npm.
+
+2) BANCO PERSISTENTE NA PUBLICAÇÃO (o PDF exige PostgreSQL ou Firestore ao publicar): quando existir a variável DATABASE_URL, use PostgreSQL (pacote pg) com o mesmo esquema (mesmas tabelas, PK/FK, is_teste, data de coleta e histórico) e migrations automáticas; sem DATABASE_URL, continue com SQLite local. Mantenha uma interface única de acesso a dados para o resto do código não mudar. A URL do banco só por variável de ambiente, nunca no código. Vou usar Neon (PostgreSQL) pelo Marketplace da Vercel. Atualize o README: escolha do banco e por quê.
+
+3) DESAFIO EXTRA / passo 5 da ordem do sistema 6: análise de sensibilidade. Mostre, para os municípios selecionados, a posição no ranking do estado com os pesos atuais e a nova posição quando cada indicador é retirado (peso 0), com quantas posições sobe ou desce, em tabela acessível. Explique na tela que mudanças grandes indicam que o resultado depende muito daquele indicador. Adicione teste unitário.
+
+4) MAPA: a legenda usa verde-água em "Moderada", fora da ordem. Use uma escala sequencial de um só matiz (do claro ao escuro), com contraste suficiente, mantendo os rótulos em texto.
+
+5) README:
+- na tabela de fontes, acrescente a coluna "Nível da fonte" conforme o PDF (A = API REST aberta sem cadastro; B = com chave; C = arquivo CSV; D = restrito): IBGE e Ipeadata são nível A;
+- no prompt 1 da seção 7, restaure as quebras de linha (antes de cada título em maiúsculas, de cada item "- " e de cada tela numerada);
+- acrescente os prompts 6 (link do repositório) e este (7);
+- inclua quantas linhas o seed de teste gera por tabela.
+
+6) O script db:seed-test hoje não imprime nada: faça-o mostrar as linhas geradas por tabela.
+
+Rode npm install (sem flags), npm test, npm run lint e npm run build e me mostre o resultado.
+```
+
 

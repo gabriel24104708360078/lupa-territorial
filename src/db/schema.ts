@@ -1,18 +1,25 @@
 /**
- * Esquema relacional SQLite (via node:sqlite) para o Lupa Territorial.
- * Contém 5 tabelas relacionadas com PK/FK e suporte a cache com data de coleta, histórico e flag is_teste.
+ * Esquema relacional único do Lupa Territorial (PostgreSQL quando DATABASE_URL existir; SQLite local caso contrário).
+ * Contém 5 tabelas relacionadas com PK/FK, data de coleta, histórico e coluna is_teste, com migrations automáticas.
  */
 
-import fs from 'node:fs';
+import dotenv from 'dotenv';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import { INDICATORS_CATALOG } from '../lib/indicatorsCatalog.ts';
+import { createPostgresClient, createSqliteClient, type AppDatabase } from './client.ts';
+
+dotenv.config({ quiet: true });
 
 const DEFAULT_LOCAL_DB_PATH = path.resolve(process.cwd(), 'data', 'lupa_territorial.sqlite');
 const SERVERLESS_TEMP_DB_PATH = '/tmp/lupa_territorial.sqlite';
 
 export function isServerlessRuntime(): boolean {
   return Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+}
+
+export function hasPostgresConfig(): boolean {
+  return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== '');
 }
 
 export function resolveDefaultDbPath(): string {
@@ -22,19 +29,19 @@ export function resolveDefaultDbPath(): string {
   return isServerlessRuntime() ? SERVERLESS_TEMP_DB_PATH : DEFAULT_LOCAL_DB_PATH;
 }
 
-export function openDatabase(dbPath: string = resolveDefaultDbPath()): DatabaseSync {
-  const dir = path.dirname(dbPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+export async function openDatabase(dbPath?: string): Promise<AppDatabase> {
+  if (!dbPath && hasPostgresConfig()) {
+    return createPostgresClient(process.env.DATABASE_URL!.trim());
   }
-  const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA foreign_keys = ON;');
-  db.exec('PRAGMA journal_mode = WAL;');
-  return db;
+  return createSqliteClient(dbPath ?? resolveDefaultDbPath());
 }
 
-export function runMigrations(db: DatabaseSync): void {
-  db.exec(`
+export async function runMigrations(db: AppDatabase): Promise<void> {
+  const idColumnSql =
+    db.dialect === 'postgres' ? 'id SERIAL PRIMARY KEY' : 'id INTEGER PRIMARY KEY AUTOINCREMENT';
+  const floatSql = db.dialect === 'postgres' ? 'DOUBLE PRECISION' : 'REAL';
+
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS states (
       id INTEGER PRIMARY KEY,
       sigla TEXT NOT NULL UNIQUE,
@@ -67,17 +74,17 @@ export function runMigrations(db: DatabaseSync): void {
       ano_referencia INTEGER NOT NULL,
       incluir_no_indice INTEGER NOT NULL DEFAULT 1,
       maior_e_melhor INTEGER NOT NULL DEFAULT 1,
-      peso_padrao REAL NOT NULL DEFAULT 1,
+      peso_padrao ${floatSql} NOT NULL DEFAULT 1,
       source_url TEXT NOT NULL,
       descricao TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS indicator_values (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ${idColumnSql},
       municipality_id TEXT NOT NULL REFERENCES municipalities(id) ON DELETE CASCADE,
       indicator_code TEXT NOT NULL REFERENCES indicators(code) ON DELETE CASCADE,
       ano INTEGER NOT NULL,
-      valor REAL,
+      valor ${floatSql},
       collected_at TEXT NOT NULL,
       source_mode TEXT NOT NULL DEFAULT 'online',
       is_teste INTEGER NOT NULL DEFAULT 0,
@@ -88,7 +95,7 @@ export function runMigrations(db: DatabaseSync): void {
       series_code TEXT NOT NULL,
       municipality_id TEXT NOT NULL,
       ano INTEGER NOT NULL,
-      valor REAL NOT NULL,
+      valor ${floatSql} NOT NULL,
       collected_at TEXT NOT NULL,
       source_mode TEXT NOT NULL DEFAULT 'online',
       PRIMARY KEY (series_code, municipality_id, ano)
@@ -99,30 +106,25 @@ export function runMigrations(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_ipea_series_mun ON ipeadata_cache(series_code, municipality_id);
   `);
 
-  const upsertIndicator = db.prepare(`
-    INSERT INTO indicators (
-      code, nome, nome_curto, unidade, fonte, tabela_codigo, variavel_codigo,
-      classificacao, ano_referencia, incluir_no_indice, maior_e_melhor,
-      peso_padrao, source_url, descricao
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(code) DO UPDATE SET
-      nome = excluded.nome,
-      nome_curto = excluded.nome_curto,
-      unidade = excluded.unidade,
-      fonte = excluded.fonte,
-      tabela_codigo = excluded.tabela_codigo,
-      variavel_codigo = excluded.variavel_codigo,
-      classificacao = excluded.classificacao,
-      ano_referencia = excluded.ano_referencia,
-      incluir_no_indice = excluded.incluir_no_indice,
-      maior_e_melhor = excluded.maior_e_melhor,
-      peso_padrao = excluded.peso_padrao,
-      source_url = excluded.source_url,
-      descricao = excluded.descricao
-  `);
-
-  for (const ind of INDICATORS_CATALOG) {
-    upsertIndicator.run(
+  await db.upsertBatch({
+    table: 'indicators',
+    columns: [
+      'code',
+      'nome',
+      'nome_curto',
+      'unidade',
+      'fonte',
+      'tabela_codigo',
+      'variavel_codigo',
+      'classificacao',
+      'ano_referencia',
+      'incluir_no_indice',
+      'maior_e_melhor',
+      'peso_padrao',
+      'source_url',
+      'descricao',
+    ],
+    rows: INDICATORS_CATALOG.map((ind) => [
       ind.code,
       ind.nome,
       ind.nomeCurto,
@@ -137,14 +139,46 @@ export function runMigrations(db: DatabaseSync): void {
       ind.pesoPadrao,
       ind.sourceUrl,
       ind.descricao,
-    );
-  }
+    ]),
+    conflictColumns: ['code'],
+    updateColumns: [
+      'nome',
+      'nome_curto',
+      'unidade',
+      'fonte',
+      'tabela_codigo',
+      'variavel_codigo',
+      'classificacao',
+      'ano_referencia',
+      'incluir_no_indice',
+      'maior_e_melhor',
+      'peso_padrao',
+      'source_url',
+      'descricao',
+    ],
+  });
 }
 
-// Execução direta via CLI (`npx tsx src/db/schema.ts`) para criar tabelas e catálogo.
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const db = openDatabase();
-  runMigrations(db);
-  console.log('Esquema SQLite criado/atualizado com sucesso.');
-  db.close();
+function isMainEntry(metaUrl: string): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return path.resolve(fileURLToPath(metaUrl)) === path.resolve(entry);
+}
+
+// Execução direta via CLI (`npm run db:migrate`) para criar tabelas e catálogo.
+if (isMainEntry(import.meta.url)) {
+  (async () => {
+    const db = await openDatabase();
+    try {
+      await runMigrations(db);
+      console.log(
+        `Esquema ${db.dialect === 'postgres' ? 'PostgreSQL' : 'SQLite'} criado/atualizado com sucesso (${INDICATORS_CATALOG.length} indicadores no catálogo).`,
+      );
+    } finally {
+      await db.close();
+    }
+  })().catch((err) => {
+    console.error('Erro ao executar migração:', err);
+    process.exit(1);
+  });
 }

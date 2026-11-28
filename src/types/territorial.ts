@@ -85,15 +85,15 @@ export function getVulnerabilityBand(score: number | null): VulnerabilityBand {
   if (score < 0.25) {
     return {
       label: 'Baixa',
-      color: '#ccfbf1',
-      textClass: 'text-teal-900',
+      color: '#e2f5f2',
+      textClass: 'text-teal-950',
       rangeText: '0,00 – 0,24',
     };
   }
   if (score < 0.5) {
     return {
       label: 'Moderada',
-      color: '#5eead4',
+      color: '#7ccac0',
       textClass: 'text-teal-950',
       rangeText: '0,25 – 0,49',
     };
@@ -101,15 +101,15 @@ export function getVulnerabilityBand(score: number | null): VulnerabilityBand {
   if (score < 0.75) {
     return {
       label: 'Alta',
-      color: '#f59e0b',
-      textClass: 'text-amber-950',
+      color: '#1f8a7d',
+      textClass: 'text-teal-950',
       rangeText: '0,50 – 0,74',
     };
   }
   return {
     label: 'Muito alta',
-    color: '#b91c1c',
-    textClass: 'text-red-900',
+    color: '#0c4640',
+    textClass: 'text-teal-950',
     rangeText: '0,75 – 1,00',
   };
 }

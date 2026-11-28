@@ -10,10 +10,11 @@ import { ChoroplethMap } from './components/ChoroplethMap.tsx';
 import { ComparisonTable } from './components/ComparisonTable.tsx';
 import { ProvenanceModal } from './components/ProvenanceModal.tsx';
 import { RadarChartSvg } from './components/RadarChartSvg.tsx';
+import { SensitivityTable } from './components/SensitivityTable.tsx';
 import { TrendChartSvg } from './components/TrendChartSvg.tsx';
 import { WeightsPanel } from './components/WeightsPanel.tsx';
 import { DEFAULT_WEIGHTS } from './lib/indicatorsCatalog.ts';
-import { computeCompositeIndexForState } from './lib/indexCalculator.ts';
+import { computeCompositeIndexForState, computeSensitivityAnalysis } from './lib/indexCalculator.ts';
 import {
   formatDatePtBr,
   getVulnerabilityBand,
@@ -119,6 +120,17 @@ export default function App() {
     const byId = new Map(overview.municipalities.map((m) => [m.id, m]));
     return selectedMunIds.map((id) => byId.get(id)).filter((m): m is NonNullable<typeof m> => Boolean(m));
   }, [overview, selectedMunIds]);
+
+  const sensitivityByMun = useMemo(() => {
+    if (!overview || selectedMunIds.length === 0) return {};
+    const inputs = overview.municipalities.map((m) => ({
+      municipalityId: m.id,
+      values: Object.fromEntries(
+        Object.entries(m.values).map(([code, obj]) => [code, obj.valor]),
+      ),
+    }));
+    return computeSensitivityAnalysis(inputs, weights, selectedMunIds);
+  }, [overview, weights, selectedMunIds]);
 
   const normalizedByMunForRadar = useMemo(() => {
     const out: Record<string, Record<string, number | null>> = {};
@@ -454,7 +466,14 @@ export default function App() {
                   onInspectProvenance={setProvenanceTarget}
                 />
 
-                {/* Gráfico de tendência histórica persistida no SQLite */}
+                {/* Análise de sensibilidade: impacto da retirada de cada indicador no ranking estadual */}
+                <SensitivityTable
+                  municipalities={selectedMunicipalities}
+                  indicators={overview.indicators}
+                  sensitivityByMun={sensitivityByMun}
+                />
+
+                {/* Gráfico de tendência histórica persistida no banco */}
                 <TrendChartSvg municipalities={selectedMunicipalities} />
               </>
             ) : null}

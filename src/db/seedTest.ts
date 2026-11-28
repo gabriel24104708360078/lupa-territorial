@@ -1,9 +1,11 @@
 /**
  * Script idempotente para inserir ou remover dados fictícios de teste (is_teste = 1).
- * Uso: `tsx src/db/seedTest.ts` para inserir e `tsx src/db/seedTest.ts --clean` para apagar apenas os dados de teste.
+ * Uso: `npm run db:seed-test` para inserir e `npm run db:clean-test` para apagar apenas os dados de teste.
  */
 
-import { DatabaseSync } from 'node:sqlite';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { AppDatabase } from './client.ts';
 import { openDatabase, runMigrations } from './schema.ts';
 
 export const TEST_STATE_ID = 99;
@@ -122,92 +124,142 @@ const TEST_MUNICIPALITIES = [
   },
 ];
 
-export function seedTestData(db: DatabaseSync): void {
+export interface SeedTestSummary {
+  states: number;
+  municipalities: number;
+  indicator_values: number;
+  indicators_catalog: number;
+  ipeadata_cache: number;
+}
+
+export async function seedTestData(db: AppDatabase): Promise<SeedTestSummary> {
   const now = new Date().toISOString();
-  db.exec('BEGIN;');
-  try {
-    db.prepare(`
+
+  const anoPorIndicador: Record<string, number> = {
+    renda_2022: 2022,
+    alfabetizacao_2022: 2022,
+    agua_2022: 2022,
+    esgoto_2022: 2022,
+    lixo_2022: 2022,
+    bolsa_familia_taxa: 2025,
+    idhm_2010: 2010,
+    vulneraveis_2010: 2010,
+    populacao: 2022,
+    domicilios: 2022,
+  };
+
+  // Deduplica (municipality_id, indicator_code, ano) porque populacao=2022 aparece em metrics e popTrend
+  const valMap = new Map<string, unknown[]>();
+  const munRows: unknown[][] = [];
+
+  for (const mun of TEST_MUNICIPALITIES) {
+    munRows.push([mun.id, TEST_STATE_ID, mun.nome, mun.microrregiao, mun.regiao_imediata, 1]);
+
+    for (const [code, val] of Object.entries(mun.metrics)) {
+      const ano = anoPorIndicador[code];
+      valMap.set(`${mun.id}:${code}:${ano}`, [mun.id, code, ano, val, now, 'seed_teste', 1]);
+    }
+    for (const [ano, pop] of mun.popTrend) {
+      valMap.set(`${mun.id}:populacao:${ano}`, [mun.id, 'populacao', ano, pop, now, 'seed_teste', 1]);
+    }
+  }
+
+  await db.transaction(async (tx) => {
+    await tx.execute(
+      `
       INSERT INTO states (id, sigla, nome, regiao, malha_geojson, collected_at, is_offline, is_teste)
       VALUES (?, ?, ?, ?, ?, ?, 0, 1)
       ON CONFLICT(id) DO UPDATE SET
-        sigla = excluded.sigla,
-        nome = excluded.nome,
-        malha_geojson = excluded.malha_geojson,
-        collected_at = excluded.collected_at,
+        sigla = EXCLUDED.sigla,
+        nome = EXCLUDED.nome,
+        malha_geojson = EXCLUDED.malha_geojson,
+        collected_at = EXCLUDED.collected_at,
         is_teste = 1
-    `).run(TEST_STATE_ID, 'ZT', 'Estado Fictício de Teste', 'Ambiente de Testes', TEST_GEOJSON, now);
+      `,
+      [TEST_STATE_ID, 'ZT', 'Estado Fictício de Teste', 'Ambiente de Testes', TEST_GEOJSON, now],
+    );
 
-    const upsertMun = db.prepare(`
-      INSERT INTO municipalities (id, state_id, nome, microrregiao, regiao_imediata, is_teste)
-      VALUES (?, ?, ?, ?, ?, 1)
-      ON CONFLICT(id) DO UPDATE SET
-        nome = excluded.nome,
-        microrregiao = excluded.microrregiao,
-        regiao_imediata = excluded.regiao_imediata,
-        is_teste = 1
-    `);
+    await tx.upsertBatch({
+      table: 'municipalities',
+      columns: ['id', 'state_id', 'nome', 'microrregiao', 'regiao_imediata', 'is_teste'],
+      rows: munRows,
+      conflictColumns: ['id'],
+      updateColumns: ['nome', 'microrregiao', 'regiao_imediata', 'is_teste'],
+    });
 
-    const upsertVal = db.prepare(`
-      INSERT INTO indicator_values (municipality_id, indicator_code, ano, valor, collected_at, source_mode, is_teste)
-      VALUES (?, ?, ?, ?, ?, 'seed_teste', 1)
-      ON CONFLICT(municipality_id, indicator_code, ano, is_teste) DO UPDATE SET
-        valor = excluded.valor,
-        collected_at = excluded.collected_at
-    `);
+    await tx.upsertBatch({
+      table: 'indicator_values',
+      columns: ['municipality_id', 'indicator_code', 'ano', 'valor', 'collected_at', 'source_mode', 'is_teste'],
+      rows: Array.from(valMap.values()),
+      conflictColumns: ['municipality_id', 'indicator_code', 'ano', 'is_teste'],
+      updateColumns: ['valor', 'collected_at', 'source_mode'],
+    });
+  });
 
-    const anoPorIndicador: Record<string, number> = {
-      renda_2022: 2022,
-      alfabetizacao_2022: 2022,
-      agua_2022: 2022,
-      esgoto_2022: 2022,
-      lixo_2022: 2022,
-      bolsa_familia_taxa: 2025,
-      idhm_2010: 2010,
-      vulneraveis_2010: 2010,
-      populacao: 2022,
-      domicilios: 2022,
+  const statesRow = await db.queryOne<{ cnt: number | string }>('SELECT COUNT(*) as cnt FROM states WHERE is_teste = 1');
+  const munRow = await db.queryOne<{ cnt: number | string }>(
+    'SELECT COUNT(*) as cnt FROM municipalities WHERE is_teste = 1',
+  );
+  const valRow = await db.queryOne<{ cnt: number | string }>(
+    'SELECT COUNT(*) as cnt FROM indicator_values WHERE is_teste = 1',
+  );
+  const catRow = await db.queryOne<{ cnt: number | string }>('SELECT COUNT(*) as cnt FROM indicators');
+
+  return {
+    states: Number(statesRow?.cnt ?? 0),
+    municipalities: Number(munRow?.cnt ?? 0),
+    indicator_values: Number(valRow?.cnt ?? 0),
+    indicators_catalog: Number(catRow?.cnt ?? 0),
+    ipeadata_cache: 0,
+  };
+}
+
+export async function cleanTestData(
+  db: AppDatabase,
+): Promise<{ statesDeleted: number; municipalitiesDeleted: number; valuesDeleted: number }> {
+  return db.transaction(async (tx) => {
+    const valRes = await tx.execute('DELETE FROM indicator_values WHERE is_teste = 1');
+    const munRes = await tx.execute('DELETE FROM municipalities WHERE is_teste = 1');
+    const stRes = await tx.execute('DELETE FROM states WHERE is_teste = 1');
+    return {
+      statesDeleted: stRes.changes,
+      municipalitiesDeleted: munRes.changes,
+      valuesDeleted: valRes.changes,
     };
+  });
+}
 
-    for (const mun of TEST_MUNICIPALITIES) {
-      upsertMun.run(mun.id, TEST_STATE_ID, mun.nome, mun.microrregiao, mun.regiao_imediata);
-      for (const [code, val] of Object.entries(mun.metrics)) {
-        upsertVal.run(mun.id, code, anoPorIndicador[code], val, now);
+function isMainEntry(metaUrl: string): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return path.resolve(fileURLToPath(metaUrl)) === path.resolve(entry);
+}
+
+if (isMainEntry(import.meta.url)) {
+  (async () => {
+    const db = await openDatabase();
+    try {
+      await runMigrations(db);
+      if (process.argv.includes('--clean')) {
+        const res = await cleanTestData(db);
+        console.log(`Dados de teste removidos (${db.dialect}):`);
+        console.log(`- states: ${res.statesDeleted} linha(s) removida(s)`);
+        console.log(`- municipalities: ${res.municipalitiesDeleted} linha(s) removida(s)`);
+        console.log(`- indicator_values: ${res.valuesDeleted} linha(s) removida(s)`);
+      } else {
+        const counts = await seedTestData(db);
+        console.log(`Dados de teste inseridos/atualizados (${db.dialect}, estado ZT, id=99, is_teste=1):`);
+        console.log(`- states (is_teste=1): ${counts.states} linha(s)`);
+        console.log(`- municipalities (is_teste=1): ${counts.municipalities} linha(s)`);
+        console.log(`- indicator_values (is_teste=1): ${counts.indicator_values} linha(s)`);
+        console.log(`- indicators (catálogo compartilhado): ${counts.indicators_catalog} linha(s)`);
+        console.log(`- ipeadata_cache: ${counts.ipeadata_cache} linha(s)`);
       }
-      for (const [ano, pop] of mun.popTrend) {
-        upsertVal.run(mun.id, 'populacao', ano, pop, now);
-      }
+    } finally {
+      await db.close();
     }
-
-    db.exec('COMMIT;');
-  } catch (err) {
-    db.exec('ROLLBACK;');
-    throw err;
-  }
-}
-
-export function cleanTestData(db: DatabaseSync): { statesDeleted: number; municipalitiesDeleted: number; valuesDeleted: number } {
-  db.exec('BEGIN;');
-  try {
-    const valuesDeleted = Number(db.prepare('DELETE FROM indicator_values WHERE is_teste = 1').run().changes);
-    const municipalitiesDeleted = Number(db.prepare('DELETE FROM municipalities WHERE is_teste = 1').run().changes);
-    const statesDeleted = Number(db.prepare('DELETE FROM states WHERE is_teste = 1').run().changes);
-    db.exec('COMMIT;');
-    return { statesDeleted, municipalitiesDeleted, valuesDeleted };
-  } catch (err) {
-    db.exec('ROLLBACK;');
-    throw err;
-  }
-}
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const db = openDatabase();
-  runMigrations(db);
-  if (process.argv.includes('--clean')) {
-    const res = cleanTestData(db);
-    console.log('Dados de teste removidos:', res);
-  } else {
-    seedTestData(db);
-    console.log('Dados de teste inseridos/atualizados (estado ZT, id=99, is_teste=1).');
-  }
-  db.close();
+  })().catch((err) => {
+    console.error('Erro no script de seed de teste:', err);
+    process.exit(1);
+  });
 }

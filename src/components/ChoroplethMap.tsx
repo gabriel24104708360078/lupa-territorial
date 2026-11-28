@@ -99,6 +99,7 @@ export function ChoroplethMap({
           fillOpacity: 0.88,
           color: isSelected ? '#0f172a' : '#475569',
           weight: isSelected ? 2.6 : 0.7,
+          dashArray: score === null ? '4 3' : undefined,
         };
       },
       onEachFeature: (feature, featureLayer) => {
@@ -146,6 +147,7 @@ export function ChoroplethMap({
         fillOpacity: 0.88,
         color: isSelected ? '#0f172a' : '#475569',
         weight: isSelected ? 2.6 : 0.7,
+        dashArray: score === null ? '4 3' : undefined,
       });
 
       const labelScore = score !== null ? score.toFixed(3).replace('.', ',') : 'Sem dado';
@@ -192,7 +194,9 @@ export function ChoroplethMap({
         {legendSteps.map((step) => (
           <li key={step.label} className="flex items-center gap-1.5">
             <span
-              className="inline-block h-3.5 w-3.5 rounded-sm border border-slate-500"
+              className={`inline-block h-3.5 w-3.5 rounded-sm border border-slate-500 ${
+                step.label === 'Indisponível' ? 'border-dashed' : ''
+              }`}
               style={{ backgroundColor: step.color }}
               aria-hidden="true"
             />
