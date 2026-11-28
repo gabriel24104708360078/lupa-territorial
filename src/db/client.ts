@@ -1,6 +1,6 @@
 /**
  * Interface única de acesso ao banco de dados para SQLite (local) e PostgreSQL (publicação via DATABASE_URL).
- * Suporta transações seguras, advisory locks para migrations no Postgres, SSL verify-full explícito e upsert em blocos de 500 linhas.
+ * Suporta pg_advisory_xact_lock compatível com PgBouncer (modo transação), timeouts locais, SSL verify-full e lotes de 500 linhas.
  */
 
 import fs from 'node:fs';
@@ -17,6 +17,15 @@ export interface UpsertBatchOptions {
   chunkSize?: number;
 }
 
+export interface AdvisoryLockOptions {
+  /** Se true, retorna { acquired: false } em lock_timeout (55P03) ou statement_timeout (57014) sem lançar erro */
+  skipOnTimeout?: boolean;
+}
+
+export type AdvisoryLockResult<T> =
+  | { acquired: true; value: T }
+  | { acquired: false; reason: 'lock_timeout' | 'statement_timeout' };
+
 export interface DbExecutor {
   readonly dialect: DbDialect;
   queryAll<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
@@ -31,8 +40,8 @@ export interface AppDatabase extends DbExecutor {
   withAdvisoryLock<T>(
     lockKey: number,
     fn: (exec: DbExecutor) => Promise<T>,
-    options?: { transaction?: boolean },
-  ): Promise<T>;
+    options?: AdvisoryLockOptions,
+  ): Promise<AdvisoryLockResult<T>>;
   close(): Promise<void>;
 }
 
@@ -214,16 +223,12 @@ export async function createSqliteClient(dbPath: string): Promise<AppDatabase> {
     async withAdvisoryLock<T>(
       _lockKey: number,
       fn: (exec: DbExecutor) => Promise<T>,
-      options?: { transaction?: boolean },
-    ): Promise<T> {
-      if (!options?.transaction) {
-        return fn(executor);
-      }
+    ): Promise<AdvisoryLockResult<T>> {
       db.exec('BEGIN IMMEDIATE;');
       try {
-        const result = await fn(executor);
+        const value = await fn(executor);
         db.exec('COMMIT;');
-        return result;
+        return { acquired: true, value };
       } catch (err) {
         db.exec('ROLLBACK;');
         throw err;
@@ -233,6 +238,12 @@ export async function createSqliteClient(dbPath: string): Promise<AppDatabase> {
       db.close();
     },
   };
+}
+
+export function getPgErrorCode(err: unknown): string | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
 }
 
 export async function createPostgresClient(rawConnectionString: string): Promise<AppDatabase> {
@@ -245,7 +256,7 @@ export async function createPostgresClient(rawConnectionString: string): Promise
     connectionString,
     max: 5,
     idleTimeoutMillis: 15000,
-    connectionTimeoutMillis: 15000,
+    connectionTimeoutMillis: 10000,
     ...(ssl !== undefined ? { ssl } : {}),
   });
 
@@ -285,6 +296,8 @@ export async function createPostgresClient(rawConnectionString: string): Promise
       const txExec = makeExecutor(client);
       try {
         await client.query('BEGIN');
+        await client.query("SET LOCAL lock_timeout = '10s'");
+        await client.query("SET LOCAL statement_timeout = '20s'");
         const result = await fn(txExec);
         await client.query('COMMIT');
         return result;
@@ -295,29 +308,36 @@ export async function createPostgresClient(rawConnectionString: string): Promise
         client.release();
       }
     },
+    /**
+     * Usa pg_advisory_xact_lock dentro de uma transação com lock_timeout='10s' e statement_timeout='20s'.
+     * Compatível com PgBouncer em modo transação (o lock é liberado automaticamente no COMMIT/ROLLBACK).
+     */
     async withAdvisoryLock<T>(
       lockKey: number,
       fn: (exec: DbExecutor) => Promise<T>,
-      options?: { transaction?: boolean },
-    ): Promise<T> {
+      options?: AdvisoryLockOptions,
+    ): Promise<AdvisoryLockResult<T>> {
       const client = await pool.connect();
       const lockedExec = makeExecutor(client);
       try {
-        await client.query('SELECT pg_advisory_lock($1)', [lockKey]);
-        if (!options?.transaction) {
-          return await fn(lockedExec);
-        }
         await client.query('BEGIN');
-        try {
-          const result = await fn(lockedExec);
-          await client.query('COMMIT');
-          return result;
-        } catch (err) {
-          await client.query('ROLLBACK').catch(() => undefined);
-          throw err;
+        await client.query("SET LOCAL lock_timeout = '10s'");
+        await client.query("SET LOCAL statement_timeout = '20s'");
+        await client.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
+        const value = await fn(lockedExec);
+        await client.query('COMMIT');
+        return { acquired: true, value };
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        const code = getPgErrorCode(err);
+        if (options?.skipOnTimeout && (code === '55P03' || code === '57014')) {
+          return {
+            acquired: false,
+            reason: code === '55P03' ? 'lock_timeout' : 'statement_timeout',
+          };
         }
+        throw err;
       } finally {
-        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]).catch(() => undefined);
         client.release();
       }
     },

@@ -14,6 +14,7 @@ import {
 } from '../src/lib/indexCalculator.ts';
 import { convertQuestionMarksToPg, normalizePgConnectionString } from '../src/db/client.ts';
 import { isPgAlreadyExistsError } from '../src/db/schema.ts';
+import { isNeededIpeadataRow } from '../src/services/externalData.ts';
 
 test('normalizeMinMax normaliza corretamente no intervalo [0, 1]', () => {
   assert.equal(normalizeMinMax(100, 100, 500), 0);
@@ -120,13 +121,6 @@ test('computeStateBounds e computeCompositeIndexForState lidam com valores nulos
 });
 
 test('computeSensitivityAnalysis calcula ranking estadual e deslocamento ao retirar cada indicador', () => {
-  // Cenário com 3 municípios em que M2 possui renda muito pior que M3, mas água/esgoto melhores:
-  // Com peso igual entre renda_2022 e agua_2022:
-  // M1: renda=1000 (vuln 1.0), agua=20 (vuln 1.0) -> média 1.00 (1º)
-  // M2: renda=1200 (vuln 0.9), agua=90 (vuln 0.125) -> média 0.5125 (2º)
-  // M3: renda=3000 (vuln 0.0), agua=100 (vuln 0.0) -> média 0.00 (3º)
-  // Mas se colocarmos M4 intermediário com renda=2500 (vuln 0.25) e agua=30 (vuln 0.875) -> média 0.5625 (2º), M2 fica em 3º.
-  // Ao retirar renda_2022 (peso 0), M2 cai de 0.5125 para 0.125 e M4 vai para 0.875, ou ao retirar agua_2022, M2 salta para 2º (+1)!
   const municipalities = [
     { municipalityId: 'M1', values: { renda_2022: 1000, agua_2022: 20 } },
     { municipalityId: 'M2', values: { renda_2022: 1200, agua_2022: 90 } },
@@ -147,19 +141,16 @@ test('computeSensitivityAnalysis calcula ranking estadual e deslocamento ao reti
   const sM2 = sensitivity['M2'];
   assert.equal(sM2.baseRank, 3);
 
-  // Ao retirar agua_2022 (em que M2 era bom), M2 passa a ser avaliado só por renda (vuln 0.9) e sobe de 3º para 2º (+1)
   const aguaShiftM2 = sM2.shifts.find((s) => s.indicatorCode === 'agua_2022');
   assert.ok(aguaShiftM2);
   assert.equal(aguaShiftM2.newRank, 2);
   assert.equal(aguaShiftM2.rankDelta, 1);
 
-  // M4, por outro lado, cai de 2º para 3º (-1) quando agua_2022 é retirada
   const aguaShiftM4 = sensitivity['M4'].shifts.find((s) => s.indicatorCode === 'agua_2022');
   assert.ok(aguaShiftM4);
   assert.equal(aguaShiftM4.newRank, 3);
   assert.equal(aguaShiftM4.rankDelta, -1);
 
-  // Indicador já zerado (idhm_2010) mantém rankDelta = 0
   const idhmShiftM2 = sM2.shifts.find((s) => s.indicatorCode === 'idhm_2010');
   assert.ok(idhmShiftM2);
   assert.equal(idhmShiftM2.rankDelta, 0);
@@ -190,4 +181,17 @@ test('isPgAlreadyExistsError reconhece códigos 23505 e 42P07 de DDL concorrente
   assert.equal(isPgAlreadyExistsError({ code: '42P07' }), true);
   assert.equal(isPgAlreadyExistsError({ code: '42601' }), false);
   assert.equal(isPgAlreadyExistsError(null), false);
+});
+
+test('isNeededIpeadataRow filtra apenas municípios da UF e anos usados pelo aplicativo', () => {
+  // BA = 29, MG = 31
+  assert.equal(isNeededIpeadataRow('FAM_PBF', '2927408', 2025, '29'), true);
+  assert.equal(isNeededIpeadataRow('FAM_PBF', '2927408', 2018, '29'), true);
+  assert.equal(isNeededIpeadataRow('FAM_PBF', '2927408', 2017, '29'), false);
+  assert.equal(isNeededIpeadataRow('FAM_PBF', '3106200', 2025, '29'), false);
+
+  assert.equal(isNeededIpeadataRow('ADH_IDHM', '2927408', 2010, '29'), true);
+  assert.equal(isNeededIpeadataRow('ADH_IDHM', '2927408', 2000, '29'), false);
+  assert.equal(isNeededIpeadataRow('ADH_PPOB', '2927408', 2010, '29'), true);
+  assert.equal(isNeededIpeadataRow('ADH_PPOB', '2927408', 1991, '29'), false);
 });

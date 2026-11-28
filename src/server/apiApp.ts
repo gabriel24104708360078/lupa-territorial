@@ -6,7 +6,11 @@
 import express, { type Express, type Request, type Response } from 'express';
 import type { AppDatabase } from '../db/client.ts';
 import { openDatabase, runMigrations } from '../db/schema.ts';
+import { INDICATORS_CATALOG } from '../lib/indicatorsCatalog.ts';
 import { ensureStateDataLoaded, ensureStatesList } from '../services/externalData.ts';
+
+const IPEADATA_NOTICE =
+  'O IVS (AVS_IVS) no Ipeadata existe apenas para Brasil, Regiões e Estados (sem série municipal). Por isso utilizamos a taxa municipal de benefícios do Bolsa Família por 1.000 habitantes (FAM_PBF) e, com peso padrão 0 por serem de 2010, o IDHM (ADH_IDHM) e a proporção de vulneráveis à pobreza (ADH_PPOB).';
 
 let sharedDbPromise: Promise<AppDatabase> | null = null;
 
@@ -70,6 +74,38 @@ export function createApiApp(): Express {
     try {
       const db = await getDatabase();
       const status = await ensureStateDataLoaded(db, stateId);
+
+      // Carga recente (online ou fallback offline) já montada em memória: evita round-trip extra e funciona mesmo se o lock do cache expirar
+      if (status.inMemoryOverview) {
+        const mem = status.inMemoryOverview;
+        const sortedIndicators = [...INDICATORS_CATALOG].sort((a, b) => {
+          if (Number(b.incluirNoIndice) !== Number(a.incluirNoIndice)) {
+            return Number(b.incluirNoIndice) - Number(a.incluirNoIndice);
+          }
+          if (b.pesoPadrao !== a.pesoPadrao) {
+            return b.pesoPadrao - a.pesoPadrao;
+          }
+          return b.anoReferencia - a.anoReferencia;
+        });
+
+        res.json({
+          state: {
+            id: Number(mem.state.id),
+            sigla: mem.state.sigla,
+            nome: mem.state.nome,
+            regiao: mem.state.regiao,
+            collectedAt: status.collectedAt,
+            isOffline: status.isOffline,
+            offlineIndicators: status.offlineIndicators,
+            isTeste: status.isTeste,
+          },
+          indicators: sortedIndicators,
+          municipalities: mem.municipalities,
+          malhaGeoJson: mem.malhaGeoJson,
+          ipeadataNotice: IPEADATA_NOTICE,
+        });
+        return;
+      }
 
       const stateRow = await db.queryOne<{
         id: number;
@@ -221,8 +257,7 @@ export function createApiApp(): Express {
           trends: byMun[m.id]?.trends || { populacao: [], bolsa_familia_taxa: [] },
         })),
         malhaGeoJson: stateRow.malha_geojson ? JSON.parse(stateRow.malha_geojson) : null,
-        ipeadataNotice:
-          'O IVS (AVS_IVS) no Ipeadata existe apenas para Brasil, Regiões e Estados (sem série municipal). Por isso utilizamos a taxa municipal de benefícios do Bolsa Família por 1.000 habitantes (FAM_PBF) e, com peso padrão 0 por serem de 2010, o IDHM (ADH_IDHM) e a proporção de vulneráveis à pobreza (ADH_PPOB).',
+        ipeadataNotice: IPEADATA_NOTICE,
       });
     } catch (err) {
       console.error('Erro em GET /api/states/:stateId/overview:', err);

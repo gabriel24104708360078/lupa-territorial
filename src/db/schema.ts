@@ -1,7 +1,7 @@
 /**
  * Esquema relacional único do Lupa Territorial (PostgreSQL quando DATABASE_URL existir; SQLite local caso contrário).
- * Contém 5 tabelas relacionadas com PK/FK, data de coleta, histórico e coluna is_teste, com migrations automáticas
- * protegidas por promessa única por instância, pg_advisory_lock/unlock e tratamento idempotente de 23505/42P07.
+ * Contém 5 tabelas relacionadas com PK/FK, data de coleta, histórico e is_teste, com migrations protegidas
+ * por promessa única por instância, pg_advisory_xact_lock + SAVEPOINT e tratamento idempotente de 23505/42P07.
  */
 
 import dotenv from 'dotenv';
@@ -49,6 +49,21 @@ export function isPgAlreadyExistsError(err: unknown): boolean {
 }
 
 async function execDdlIgnoreAlreadyExists(executor: DbExecutor, statement: string): Promise<void> {
+  if (executor.dialect === 'postgres') {
+    await executor.execute('SAVEPOINT ddl_step');
+    try {
+      await executor.execute(statement);
+      await executor.execute('RELEASE SAVEPOINT ddl_step');
+    } catch (err) {
+      await executor.execute('ROLLBACK TO SAVEPOINT ddl_step').catch(() => undefined);
+      if (isPgAlreadyExistsError(err)) {
+        return;
+      }
+      throw err;
+    }
+    return;
+  }
+
   try {
     await executor.execute(statement);
   } catch (err) {
@@ -140,63 +155,72 @@ export function runMigrations(db: AppDatabase): Promise<void> {
       'CREATE INDEX IF NOT EXISTS idx_ipea_series_mun ON ipeadata_cache(series_code, municipality_id)',
     ];
 
-    await db.withAdvisoryLock(MIGRATIONS_LOCK_KEY, async (lockExec) => {
-      for (const stmt of ddlStatements) {
-        await execDdlIgnoreAlreadyExists(lockExec, stmt);
-      }
+    const lockResult = await db.withAdvisoryLock(
+      MIGRATIONS_LOCK_KEY,
+      async (lockExec) => {
+        for (const stmt of ddlStatements) {
+          await execDdlIgnoreAlreadyExists(lockExec, stmt);
+        }
 
-      await lockExec.upsertBatch({
-        table: 'indicators',
-        columns: [
-          'code',
-          'nome',
-          'nome_curto',
-          'unidade',
-          'fonte',
-          'tabela_codigo',
-          'variavel_codigo',
-          'classificacao',
-          'ano_referencia',
-          'incluir_no_indice',
-          'maior_e_melhor',
-          'peso_padrao',
-          'source_url',
-          'descricao',
-        ],
-        rows: INDICATORS_CATALOG.map((ind) => [
-          ind.code,
-          ind.nome,
-          ind.nomeCurto,
-          ind.unidade,
-          ind.fonte,
-          ind.tabelaCodigo,
-          ind.variavelCodigo,
-          ind.classificacao,
-          ind.anoReferencia,
-          ind.incluirNoIndice ? 1 : 0,
-          ind.maiorEMelhor ? 1 : 0,
-          ind.pesoPadrao,
-          ind.sourceUrl,
-          ind.descricao,
-        ]),
-        conflictColumns: ['code'],
-        updateColumns: [
-          'nome',
-          'nome_curto',
-          'unidade',
-          'fonte',
-          'tabela_codigo',
-          'variavel_codigo',
-          'classificacao',
-          'ano_referencia',
-          'incluir_no_indice',
-          'maior_e_melhor',
-          'peso_padrao',
-          'source_url',
-          'descricao',
-        ],
-      });
-    });
+        await lockExec.upsertBatch({
+          table: 'indicators',
+          columns: [
+            'code',
+            'nome',
+            'nome_curto',
+            'unidade',
+            'fonte',
+            'tabela_codigo',
+            'variavel_codigo',
+            'classificacao',
+            'ano_referencia',
+            'incluir_no_indice',
+            'maior_e_melhor',
+            'peso_padrao',
+            'source_url',
+            'descricao',
+          ],
+          rows: INDICATORS_CATALOG.map((ind) => [
+            ind.code,
+            ind.nome,
+            ind.nomeCurto,
+            ind.unidade,
+            ind.fonte,
+            ind.tabelaCodigo,
+            ind.variavelCodigo,
+            ind.classificacao,
+            ind.anoReferencia,
+            ind.incluirNoIndice ? 1 : 0,
+            ind.maiorEMelhor ? 1 : 0,
+            ind.pesoPadrao,
+            ind.sourceUrl,
+            ind.descricao,
+          ]),
+          conflictColumns: ['code'],
+          updateColumns: [
+            'nome',
+            'nome_curto',
+            'unidade',
+            'fonte',
+            'tabela_codigo',
+            'variavel_codigo',
+            'classificacao',
+            'ano_referencia',
+            'incluir_no_indice',
+            'maior_e_melhor',
+            'peso_padrao',
+            'source_url',
+            'descricao',
+          ],
+        });
+      },
+      { skipOnTimeout: true },
+    );
+
+    if (!lockResult.acquired) {
+      // Outra instância concorrente já está executando as migrations; segue para atender a requisição.
+      console.warn(`runMigrations: lock não obtido (${lockResult.reason}); prosseguindo sem bloquear.`);
+    }
   })().catch((err) => {
     migrationPromises.delete(db);
     throw err;
