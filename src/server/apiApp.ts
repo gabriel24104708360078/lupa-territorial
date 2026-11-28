@@ -183,6 +183,7 @@ export function createApiApp(): Express {
           regiao: stateRow.regiao,
           collectedAt: status.collectedAt,
           isOffline: status.isOffline,
+          offlineIndicators: status.offlineIndicators,
           isTeste: status.isTeste || stateRow.is_teste === 1,
         },
         indicators: indicators.map((ind) => ({

@@ -2,12 +2,19 @@
  * Tipos TypeScript compartilhados entre as respostas da API do servidor e os componentes React.
  */
 
+export interface OfflineIndicatorNotice {
+  code: string;
+  nome: string;
+  collectedAt: string;
+}
+
 export interface StateSummary {
   id: number;
   sigla: string;
   nome: string;
   regiao: string;
   isOffline: boolean;
+  offlineIndicators?: OfflineIndicatorNotice[];
   isTeste: boolean;
   collectedAt: string;
 }

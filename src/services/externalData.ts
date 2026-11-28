@@ -49,11 +49,34 @@ function resolveDataDir(): string {
 }
 
 const DATA_DIR = resolveDataDir();
-const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
-const FETCH_TIMEOUT_MS = IS_SERVERLESS ? 6500 : 18000;
-const IPEA_TIMEOUT_MS = IS_SERVERLESS ? 7500 : 30000;
+const FETCH_TIMEOUT_MS = 25000;
+const IPEA_TIMEOUT_MS = 25000;
 // Cache considerado fresco por 7 dias antes de tentar nova atualização online
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface OfflineIndicatorNotice {
+  code: string;
+  nome: string;
+  collectedAt: string;
+}
+
+export interface SeriesSyncStatus {
+  mode: 'online' | 'offline';
+  collectedAt: string;
+}
+
+const INDICATOR_LABELS: Record<string, string> = {
+  renda_2022: 'Renda per capita (IBGE 10295)',
+  alfabetizacao_2022: 'Alfabetização (IBGE 9543)',
+  agua_2022: 'Água por rede (IBGE 6803)',
+  esgoto_2022: 'Esgotamento sanitário (IBGE 6805)',
+  lixo_2022: 'Coleta de lixo (IBGE 6892)',
+  populacao: 'População residente (IBGE 4714 / 6579)',
+  domicilios: 'Domicílios ocupados (IBGE 4712)',
+  bolsa_familia_taxa: 'Bolsa Família / 1.000 hab. (Ipeadata FAM_PBF)',
+  idhm_2010: 'IDHM 2010 (Ipeadata ADH_IDHM)',
+  vulneraveis_2010: 'Vulneráveis à pobreza 2010 (Ipeadata ADH_PPOB)',
+};
 
 async function fetchJsonWithTimeout<T>(url: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<T> {
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
@@ -166,15 +189,19 @@ export async function ensureStatesList(db: DatabaseSync): Promise<{ states: Stat
 
 /**
  * Baixa e armazena em cache no SQLite as séries municipais do Ipeadata (uma única vez por série).
- * Regra: como o $filter da API OData do Ipeadata é lento/inconsistente, baixamos a série completa
+ * Regra: como o $filter da API OData do Ipeadata é lento/inconsistente, baixamos as séries em paralelo
  * no servidor, filtramos apenas NIVNOME === 'Municípios' e persistimos em `ipeadata_cache`.
  */
 export async function ensureIpeadataSeries(
   db: DatabaseSync,
   seriesCodes: string[] = ['FAM_PBF', 'ADH_IDHM', 'ADH_PPOB'],
-): Promise<{ isOffline: boolean; collectedAt: string }> {
-  let usedOffline = false;
-  let latestCollected = '';
+): Promise<{
+  isOffline: boolean;
+  collectedAt: string;
+  bySeries: Record<string, SeriesSyncStatus>;
+}> {
+  const bySeries: Record<string, SeriesSyncStatus> = {};
+  const toFetch: string[] = [];
 
   for (const code of seriesCodes) {
     const cachedMeta = db
@@ -182,76 +209,104 @@ export async function ensureIpeadataSeries(
       .get(code) as { cnt: number; latest: string | null; mode: string | null };
 
     if (cachedMeta.cnt > 0 && isCacheFresh(cachedMeta.latest)) {
-      latestCollected = cachedMeta.latest || latestCollected;
-      if (cachedMeta.mode === 'offline') usedOffline = true;
-      continue;
-    }
-
-    try {
-      const url = `https://www.ipeadata.gov.br/api/odata4/ValoresSerie(SERCODIGO='${encodeURIComponent(code)}')`;
-      const payload = await fetchJsonWithTimeout<{
-        value?: Array<{ SERCODIGO: string; VALDATA: string; VALVALOR: number | null; NIVNOME: string; TERCODIGO: string }>;
-      }>(url, IPEA_TIMEOUT_MS);
-
-      const now = new Date().toISOString();
-      const rows = (payload.value || []).filter(
-        (r) => r.NIVNOME === 'Municípios' && typeof r.VALVALOR === 'number' && Number.isFinite(r.VALVALOR) && r.TERCODIGO,
-      );
-
-      // Para FAM_PBF mantemos anos a partir de 2018 para tendência recente e taxa atualizada.
-      const filtered = code === 'FAM_PBF'
-        ? rows.filter((r) => Number(r.VALDATA.slice(0, 4)) >= 2018)
-        : rows;
-
-      const insert = db.prepare(`
-        INSERT INTO ipeadata_cache (series_code, municipality_id, ano, valor, collected_at, source_mode)
-        VALUES (?, ?, ?, ?, ?, 'online')
-        ON CONFLICT(series_code, municipality_id, ano) DO UPDATE SET
-          valor = excluded.valor,
-          collected_at = excluded.collected_at,
-          source_mode = 'online'
-      `);
-
-      db.exec('BEGIN;');
-      for (const r of filtered) {
-        const ano = Number(r.VALDATA.slice(0, 4));
-        if (Number.isInteger(ano)) {
-          insert.run(code, String(r.TERCODIGO), ano, r.VALVALOR!, now);
-        }
-      }
-      db.exec('COMMIT;');
-      latestCollected = now;
-    } catch {
-      const offline = readOfflineJson<{
-        collectedAt: string;
-        seriesCode: string;
-        rows: Array<{ municipalityId: string; ano: number; valor: number }>;
-      }>(`ipeadata/${code}.json`);
-
-      if (offline && offline.rows.length > 0) {
-        const insert = db.prepare(`
-          INSERT INTO ipeadata_cache (series_code, municipality_id, ano, valor, collected_at, source_mode)
-          VALUES (?, ?, ?, ?, ?, 'offline')
-          ON CONFLICT(series_code, municipality_id, ano) DO UPDATE SET
-            valor = excluded.valor,
-            collected_at = excluded.collected_at,
-            source_mode = 'offline'
-        `);
-        db.exec('BEGIN;');
-        for (const r of offline.rows) {
-          insert.run(code, r.municipalityId, r.ano, r.valor, offline.collectedAt);
-        }
-        db.exec('COMMIT;');
-        usedOffline = true;
-        latestCollected = offline.collectedAt;
-      } else if (cachedMeta.cnt > 0) {
-        usedOffline = true;
-        latestCollected = cachedMeta.latest || latestCollected;
-      }
+      bySeries[code] = {
+        mode: cachedMeta.mode === 'offline' ? 'offline' : 'online',
+        collectedAt: cachedMeta.latest || new Date().toISOString(),
+      };
+    } else {
+      toFetch.push(code);
     }
   }
 
-  return { isOffline: usedOffline, collectedAt: latestCollected || new Date().toISOString() };
+  if (toFetch.length > 0) {
+    const fetchedResults = await Promise.all(
+      toFetch.map(async (code) => {
+        try {
+          const url = `https://www.ipeadata.gov.br/api/odata4/ValoresSerie(SERCODIGO='${encodeURIComponent(code)}')`;
+          const payload = await fetchJsonWithTimeout<{
+            value?: Array<{ SERCODIGO: string; VALDATA: string; VALVALOR: number | null; NIVNOME: string; TERCODIGO: string }>;
+          }>(url, IPEA_TIMEOUT_MS);
+
+          const now = new Date().toISOString();
+          const rows = (payload.value || [])
+            .filter(
+              (r) =>
+                r.NIVNOME === 'Municípios' &&
+                typeof r.VALVALOR === 'number' &&
+                Number.isFinite(r.VALVALOR) &&
+                r.TERCODIGO,
+            )
+            .map((r) => ({
+              municipalityId: String(r.TERCODIGO),
+              ano: Number(r.VALDATA.slice(0, 4)),
+              valor: r.VALVALOR as number,
+            }))
+            .filter((r) => Number.isInteger(r.ano) && (code === 'FAM_PBF' ? r.ano >= 2018 : true));
+
+          return { code, mode: 'online' as const, collectedAt: now, rows };
+        } catch {
+          const offline = readOfflineJson<{
+            collectedAt: string;
+            seriesCode: string;
+            rows: Array<{ municipalityId: string; ano: number; valor: number }>;
+          }>(`ipeadata/${code}.json`);
+
+          if (offline && offline.rows.length > 0) {
+            return {
+              code,
+              mode: 'offline' as const,
+              collectedAt: offline.collectedAt,
+              rows: offline.rows,
+            };
+          }
+
+          const cachedFallback = db
+            .prepare('SELECT COUNT(*) as cnt, MAX(collected_at) as latest FROM ipeadata_cache WHERE series_code = ?')
+            .get(code) as { cnt: number; latest: string | null };
+
+          return {
+            code,
+            mode: 'offline' as const,
+            collectedAt: cachedFallback.latest || new Date().toISOString(),
+            rows: [] as Array<{ municipalityId: string; ano: number; valor: number }>,
+          };
+        }
+      }),
+    );
+
+    const insert = db.prepare(`
+      INSERT INTO ipeadata_cache (series_code, municipality_id, ano, valor, collected_at, source_mode)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(series_code, municipality_id, ano) DO UPDATE SET
+        valor = excluded.valor,
+        collected_at = excluded.collected_at,
+        source_mode = excluded.source_mode
+    `);
+
+    db.exec('BEGIN;');
+    try {
+      for (const item of fetchedResults) {
+        for (const r of item.rows) {
+          insert.run(item.code, r.municipalityId, r.ano, r.valor, item.collectedAt, item.mode);
+        }
+        bySeries[item.code] = {
+          mode: item.mode,
+          collectedAt: item.collectedAt,
+        };
+      }
+      db.exec('COMMIT;');
+    } catch (err) {
+      db.exec('ROLLBACK;');
+      throw err;
+    }
+  }
+
+  const statuses = Object.values(bySeries);
+  const usedOffline = statuses.some((s) => s.mode === 'offline');
+  const latestCollected =
+    statuses.map((s) => s.collectedAt).sort().at(-1) || new Date().toISOString();
+
+  return { isOffline: usedOffline, collectedAt: latestCollected, bySeries };
 }
 
 interface IbgeAgregadoResponseItem {
@@ -352,14 +407,38 @@ export async function fetchIbgeStateBundleOnline(stateId: number, stateMeta: { i
   };
 }
 
+function getOfflineIndicatorsFromDb(db: DatabaseSync, stateId: number): OfflineIndicatorNotice[] {
+  const rows = db
+    .prepare(`
+      SELECT iv.indicator_code as code, MAX(iv.collected_at) as collectedAt
+      FROM indicator_values iv
+      JOIN municipalities m ON m.id = iv.municipality_id
+      WHERE m.state_id = ? AND iv.is_teste = 0 AND iv.source_mode = 'offline'
+      GROUP BY iv.indicator_code
+      ORDER BY iv.indicator_code ASC
+    `)
+    .all(stateId) as Array<{ code: string; collectedAt: string }>;
+
+  return rows.map((r) => ({
+    code: r.code,
+    nome: INDICATOR_LABELS[r.code] || r.code,
+    collectedAt: r.collectedAt,
+  }));
+}
+
 /**
  * Garante que os municípios, malha GeoJSON e valores de indicadores de um estado estejam no SQLite.
- * Fluxo: Cache SQLite fresco -> API IBGE/Ipeadata -> Fallback offline em data/ (27 UFs).
+ * Fluxo: Cache SQLite fresco -> API IBGE + Ipeadata em paralelo -> Fallback offline granular em data/ (27 UFs).
  */
 export async function ensureStateDataLoaded(
   db: DatabaseSync,
   stateId: number,
-): Promise<{ isOffline: boolean; isTeste: boolean; collectedAt: string }> {
+): Promise<{
+  isOffline: boolean;
+  offlineIndicators: OfflineIndicatorNotice[];
+  isTeste: boolean;
+  collectedAt: string;
+}> {
   const { states } = await ensureStatesList(db);
   const stateRow = states.find((s) => s.id === stateId);
   if (!stateRow) {
@@ -368,7 +447,7 @@ export async function ensureStateDataLoaded(
 
   // Se for o estado fictício de teste (is_teste = 1), já está pronto no banco.
   if (stateRow.is_teste === 1) {
-    return { isOffline: false, isTeste: true, collectedAt: stateRow.collected_at };
+    return { isOffline: false, offlineIndicators: [], isTeste: true, collectedAt: stateRow.collected_at };
   }
 
   const munCountRow = db
@@ -377,54 +456,63 @@ export async function ensureStateDataLoaded(
 
   const valCheckRow = db
     .prepare(`
-      SELECT COUNT(*) as cnt, MAX(iv.collected_at) as latest, MAX(iv.source_mode) as mode
+      SELECT COUNT(*) as cnt, MAX(iv.collected_at) as latest
       FROM indicator_values iv
       JOIN municipalities m ON m.id = iv.municipality_id
       WHERE m.state_id = ? AND iv.is_teste = 0
     `)
-    .get(stateId) as { cnt: number; latest: string | null; mode: string | null };
+    .get(stateId) as { cnt: number; latest: string | null };
 
   if (munCountRow.cnt > 0 && valCheckRow.cnt > 0 && stateRow.malha_geojson && isCacheFresh(valCheckRow.latest)) {
     return {
-      isOffline: stateRow.is_offline === 1 || valCheckRow.mode === 'offline',
+      isOffline: stateRow.is_offline === 1,
+      offlineIndicators: getOfflineIndicatorsFromDb(db, stateId),
       isTeste: false,
       collectedAt: valCheckRow.latest || stateRow.collected_at,
     };
   }
 
-  // 1. Garante séries Ipeadata em cache único no servidor
-  const ipeaStatus = await ensureIpeadataSeries(db);
-
-  // 2. Tenta IBGE online; se falhar, usa Plano B offline em data/
-  let bundle: OfflineStateBundle | null = null;
-  let malhaGeoJson: string | null = null;
-  let sourceMode: 'online' | 'offline' = 'online';
-
-  try {
-    const online = await fetchIbgeStateBundleOnline(stateId, {
+  // 1. Dispara em paralelo: séries Ipeadata (Promise.all interno) + todos os agregados/malha IBGE (Promise.all interno)
+  const [ipeaStatus, ibgeAttempt] = await Promise.all([
+    ensureIpeadataSeries(db),
+    fetchIbgeStateBundleOnline(stateId, {
       id: stateRow.id,
       sigla: stateRow.sigla,
       nome: stateRow.nome,
       regiao: stateRow.regiao,
-    });
-    bundle = online.bundle;
-    malhaGeoJson = online.malhaGeoJson;
-  } catch {
-    sourceMode = 'offline';
+    })
+      .then((res) => ({ ok: true as const, ...res }))
+      .catch(() => ({ ok: false as const })),
+  ]);
+
+  let bundle: OfflineStateBundle | null = null;
+  let malhaGeoJson: string | null = null;
+  let ibgeMode: 'online' | 'offline' = 'online';
+
+  if (ibgeAttempt.ok) {
+    bundle = ibgeAttempt.bundle;
+    malhaGeoJson = ibgeAttempt.malhaGeoJson;
+  } else {
+    ibgeMode = 'offline';
     bundle = readOfflineJson<OfflineStateBundle>(`states/${stateId}.json`);
     const offlineGeo = readOfflineJson<Record<string, unknown>>(`malhas/${stateId}.geojson`);
     malhaGeoJson = offlineGeo ? JSON.stringify(offlineGeo) : null;
 
     if (!bundle || !malhaGeoJson) {
       if (munCountRow.cnt > 0 && valCheckRow.cnt > 0 && stateRow.malha_geojson) {
-        return { isOffline: true, isTeste: false, collectedAt: valCheckRow.latest || stateRow.collected_at };
+        return {
+          isOffline: true,
+          offlineIndicators: getOfflineIndicatorsFromDb(db, stateId),
+          isTeste: false,
+          collectedAt: valCheckRow.latest || stateRow.collected_at,
+        };
       }
       throw new Error(`Não foi possível carregar dados online nem offline para a UF ${stateRow.sigla} (${stateId}).`);
     }
   }
 
-  // 3. Persiste municípios, malha e valores IBGE + Ipeadata no SQLite
-  const collectedAt = bundle.collectedAt;
+  // 2. Persiste municípios, malha e valores IBGE + Ipeadata no SQLite mantendo origem granular
+  const ibgeCollectedAt = bundle.collectedAt;
   const upsertState = db.prepare(`
     UPDATE states SET malha_geojson = ?, collected_at = ?, is_offline = ? WHERE id = ?
   `);
@@ -445,7 +533,6 @@ export async function ensureStateDataLoaded(
       source_mode = excluded.source_mode
   `);
 
-  // Carrega séries Ipeadata em memória indexadas por município para cálculo rápido da taxa de Bolsa Família
   const ipeaRows = db
     .prepare(`
       SELECT series_code, municipality_id, ano, valor
@@ -461,9 +548,13 @@ export async function ensureStateDataLoaded(
     ipeaByMun[row.municipality_id][row.series_code][row.ano] = row.valor;
   }
 
+  const pbfMeta = ipeaStatus.bySeries['FAM_PBF'] || { mode: 'offline', collectedAt: ibgeCollectedAt };
+  const idhmMeta = ipeaStatus.bySeries['ADH_IDHM'] || { mode: 'offline', collectedAt: ibgeCollectedAt };
+  const ppobMeta = ipeaStatus.bySeries['ADH_PPOB'] || { mode: 'offline', collectedAt: ibgeCollectedAt };
+
   db.exec('BEGIN;');
   try {
-    upsertState.run(malhaGeoJson, collectedAt, sourceMode === 'offline' ? 1 : 0, stateId);
+    upsertState.run(malhaGeoJson, ibgeCollectedAt, ibgeMode === 'offline' ? 1 : 0, stateId);
 
     for (const mun of bundle.municipalities) {
       upsertMun.run(mun.id, stateId, mun.nome, mun.microrregiao, mun.regiaoImediata);
@@ -473,12 +564,11 @@ export async function ensureStateDataLoaded(
         for (const [yearStr, val] of Object.entries(yearsObj)) {
           const ano = Number(yearStr);
           if (Number.isInteger(ano)) {
-            upsertVal.run(mun.id, indCode, ano, val, collectedAt, sourceMode);
+            upsertVal.run(mun.id, indCode, ano, val, ibgeCollectedAt, ibgeMode);
           }
         }
       }
 
-      // Vincula dados do Ipeadata (FAM_PBF convertido em taxa por 1.000 habitantes, ADH_IDHM e ADH_PPOB)
       const munIpea = ipeaByMun[mun.id] || {};
       const popMap = munIbge['populacao'] || {};
       const pop2022 = popMap['2022'];
@@ -486,22 +576,21 @@ export async function ensureStateDataLoaded(
       const famPbfYears = munIpea['FAM_PBF'] || {};
       for (const [anoStr, benefCount] of Object.entries(famPbfYears)) {
         const ano = Number(anoStr);
-        // Usa população estimada do ano correspondente quando disponível, ou Censo 2022 como referência.
         const popRef = popMap[anoStr] ?? pop2022;
         if (typeof popRef === 'number' && popRef > 0) {
           const taxaPorMil = Number(((benefCount / popRef) * 1000).toFixed(2));
-          upsertVal.run(mun.id, 'bolsa_familia_taxa', ano, taxaPorMil, collectedAt, ipeaStatus.isOffline ? 'offline' : sourceMode);
+          upsertVal.run(mun.id, 'bolsa_familia_taxa', ano, taxaPorMil, pbfMeta.collectedAt, pbfMeta.mode);
         }
       }
 
       const idhmYears = munIpea['ADH_IDHM'] || {};
       for (const [anoStr, val] of Object.entries(idhmYears)) {
-        upsertVal.run(mun.id, 'idhm_2010', Number(anoStr), val, collectedAt, ipeaStatus.isOffline ? 'offline' : sourceMode);
+        upsertVal.run(mun.id, 'idhm_2010', Number(anoStr), val, idhmMeta.collectedAt, idhmMeta.mode);
       }
 
       const ppobYears = munIpea['ADH_PPOB'] || {};
       for (const [anoStr, val] of Object.entries(ppobYears)) {
-        upsertVal.run(mun.id, 'vulneraveis_2010', Number(anoStr), val, collectedAt, ipeaStatus.isOffline ? 'offline' : sourceMode);
+        upsertVal.run(mun.id, 'vulneraveis_2010', Number(anoStr), val, ppobMeta.collectedAt, ppobMeta.mode);
       }
     }
 
@@ -512,8 +601,9 @@ export async function ensureStateDataLoaded(
   }
 
   return {
-    isOffline: sourceMode === 'offline' || ipeaStatus.isOffline,
+    isOffline: ibgeMode === 'offline',
+    offlineIndicators: getOfflineIndicatorsFromDb(db, stateId),
     isTeste: false,
-    collectedAt,
+    collectedAt: ibgeCollectedAt,
   };
 }

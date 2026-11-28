@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
-import { formatDatePtBr, type IndicatorMeta } from '../types/territorial.ts';
+import { formatDatePtBr, type IndicatorMeta, type OfflineIndicatorNotice } from '../types/territorial.ts';
 
 interface AboutApiResponse {
   indicators: Array<{
@@ -36,6 +36,7 @@ interface AboutDataPageProps {
   indicatorsFallback: IndicatorMeta[];
   collectedAt: string;
   isOffline: boolean;
+  offlineIndicators?: OfflineIndicatorNotice[];
   isTeste: boolean;
   onBackToDashboard: () => void;
 }
@@ -44,6 +45,7 @@ export function AboutDataPage({
   indicatorsFallback,
   collectedAt,
   isOffline,
+  offlineIndicators = [],
   isTeste,
   onBackToDashboard,
 }: AboutDataPageProps) {
@@ -112,6 +114,18 @@ export function AboutDataPage({
           Voltar ao painel comparativo
         </button>
       </div>
+
+      {!isOffline && offlineIndicators.length > 0 && (
+        <div role="status" className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+          <span className="font-medium">
+            IBGE carregado ao vivo; apenas os indicadores abaixo usaram amostra local (modo offline):
+          </span>{' '}
+          {offlineIndicators
+            .map((item) => `${item.nome} (dados de ${formatDatePtBr(item.collectedAt)})`)
+            .join('; ')}
+          .
+        </div>
+      )}
 
       {isTeste && (
         <div role="status" className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-950">

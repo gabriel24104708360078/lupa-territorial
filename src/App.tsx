@@ -159,6 +159,7 @@ export default function App() {
 
   const collectedDateLabel = formatDatePtBr(overview?.state.collectedAt);
   const isOffline = Boolean(overview?.state.isOffline);
+  const offlineIndicators = overview?.state.offlineIndicators || [];
   const isTeste = Boolean(overview?.state.isTeste || selectedMunicipalities.some((m) => m.isTeste));
 
   return (
@@ -228,6 +229,7 @@ export default function App() {
             indicatorsFallback={overview?.indicators || []}
             collectedAt={overview?.state.collectedAt || ''}
             isOffline={isOffline}
+            offlineIndicators={offlineIndicators}
             isTeste={isTeste}
             onBackToDashboard={() => setPage('painel')}
           />
@@ -248,15 +250,28 @@ export default function App() {
               </p>
             </div>
 
-            {/* Avisos obrigatórios de modo offline ou dados de teste */}
-            {isOffline && (
+            {/* Avisos obrigatórios de modo offline total, parcial por indicador ou dados de teste */}
+            {isOffline ? (
               <div
                 role="status"
                 className="rounded-md border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-950"
               >
                 Dados de {collectedDateLabel} (modo offline) — exibindo amostra oficial armazenada localmente.
               </div>
-            )}
+            ) : offlineIndicators.length > 0 ? (
+              <div
+                role="status"
+                className="rounded-md border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-950"
+              >
+                <span className="font-medium">
+                  IBGE carregado ao vivo; apenas os indicadores abaixo usaram amostra local (modo offline):
+                </span>{' '}
+                {offlineIndicators
+                  .map((item) => `${item.nome} (dados de ${formatDatePtBr(item.collectedAt)})`)
+                  .join('; ')}
+                .
+              </div>
+            ) : null}
 
             {isTeste && (
               <div
